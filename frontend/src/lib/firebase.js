@@ -3,13 +3,13 @@ import { getAuth } from 'firebase/auth';
 import { getMessaging, getToken, onMessage } from 'firebase/messaging';
 
 const firebaseConfig = {
-  apiKey: "AIzaSyDQSawfpKEN6xZyJDO46Uux2p3X56VcsyA",
-  authDomain: "nova-sathi.firebaseapp.com",
-  projectId: "nova-sathi",
-  storageBucket: "nova-sathi.firebasestorage.app",
-  messagingSenderId: "968633028070",
-  appId: "1:968633028070:web:4087f6446500045f1ada27",
-  measurementId: "G-ZS8MF7F4EC"
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID,
+  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID
 };
 
 const app = initializeApp(firebaseConfig);

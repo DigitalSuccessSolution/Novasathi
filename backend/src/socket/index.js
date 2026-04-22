@@ -13,7 +13,19 @@ let io;
 function initializeSocket(server) {
   io = new Server(server, {
     cors: {
-      origin: process.env.CLIENT_URL || "*",
+      origin: (origin, callback) => {
+        const allowedOrigins = [
+          process.env.CLIENT_URL,
+          "http://localhost:5173",
+          "http://localhost:3000"
+        ].filter(Boolean);
+        
+        if (!origin || allowedOrigins.includes(origin) || process.env.NODE_ENV !== 'production') {
+          callback(null, true);
+        } else {
+          callback(new Error("Not allowed by CORS"));
+        }
+      },
       methods: ["GET", "POST"],
       credentials: true
     },

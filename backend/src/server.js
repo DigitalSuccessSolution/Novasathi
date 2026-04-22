@@ -30,7 +30,20 @@ const server = http.createServer(app);
 
 // Global Middleware — CORS must come before Helmet
 app.use(cors({ 
-  origin: process.env.CLIENT_URL || '*', 
+  origin: (origin, callback) => {
+    const allowedOrigins = [
+      process.env.CLIENT_URL,
+      "http://localhost:5173",
+      "http://localhost:3000"
+    ].filter(Boolean);
+    
+    // Allow if origin is in list, or if it's local dev, or if no origin (mobile apps/server-to-server)
+    if (!origin || allowedOrigins.includes(origin) || process.env.NODE_ENV !== 'production') {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
