@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+.premium-glass-border {
+  z-index: 3;
+  filter: blur(0.5px);
+}
+
+.glass-hover-glow {
+  @apply transition-all duration-500;
+}
+
+.glass-hover-glow:hover {
+  background-color: rgba(25, 25, 35, 0.6);
+  box-shadow:
+    0 20px 40px rgba(0, 0, 0, 0.6),
+    inset 0 0 20px rgba(255, 255, 255, 0.05);
+}
+
+.glass-hover-glow:hover .premium-glass-border {
+  background: linear-gradient(145deg,
+      rgba(255, 255, 255, 0.8) 0%,
+      rgba(165, 243, 252, 0.6) 25%,
+      rgba(255, 255, 255, 0.3) 50%,
+      rgba(233, 213, 255, 0.6) 75%,
+      rgba(255, 255, 255, 0.8) 100%);
+}
+
+/* Hide default spin buttons for number inputs */
+input::-webkit-outer-spin-button,
+input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[type=number] {
+  -moz-appearance: textfield;
+}

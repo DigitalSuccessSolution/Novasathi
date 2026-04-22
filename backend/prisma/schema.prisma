@@ -1,0 +1,586 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────── ENUMS ───────────────────────────
+
+enum Role {
+  USER
+  EXPERT
+  COUNSELOR
+  ADMIN
+}
+
+enum UserTag {
+  Early_Bird_User
+  General_User
+}
+
+enum ExpertStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  SUSPENDED
+}
+
+
+
+enum OnlineStatus {
+  available
+  busy
+  offline
+}
+
+enum SessionType {
+  CHAT
+  CALL
+  VIDEO
+}
+
+enum SessionStatus {
+  WAITING
+  ACTIVE
+  COMPLETED
+  CANCELLED
+  TERMINATED
+}
+
+enum TransactionType {
+  RECHARGE
+  DEDUCTION
+  REFUND
+  BONUS
+  PAYOUT
+  COMMISSION
+}
+
+enum TransactionStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
+enum ExpertCategory {
+  STAR_AND_FUTURE
+  DIL_KI_BAAT
+}
+
+enum ContentType {
+  HOROSCOPE
+  TAROT
+  MUHURAT
+  POLL
+  ARTICLE
+  AFFIRMATION
+  MESSAGE
+  MEDIA
+  BLOG
+  HANDBOOK
+}
+
+enum DisputeStatus {
+  OPEN
+  INVESTIGATING
+  RESOLVED
+  DISMISSED
+}
+
+enum GigStatus {
+  OPEN
+  IN_PROGRESS
+  CLOSED
+}
+
+// ─────────────────────────── MODELS ───────────────────────────
+
+model User {
+  id              String    @id @default(uuid())
+  phone           String    @unique
+  name            String?
+  email           String?   @unique
+  avatar          String?
+  dateOfBirth     DateTime?
+  gender          String?
+  address         String?
+  zodiacSign      String?
+  currentMood     String?
+  role            Role      @default(USER)
+  isActive        Boolean   @default(true)
+  isAnonymous     Boolean   @default(false)
+  
+  // Password Auth
+  password        String?
+  otp             String?
+  otpExpiry       DateTime?
+  
+  // Early Bird (SRS §1.3)
+  isEarlyBird     Boolean   @default(false)
+  userTag         UserTag   @default(General_User)
+  
+  // Free minutes tracking
+  freeMinutesUsed Int       @default(0)
+  signupBonusUsed Boolean   @default(false)
+  lastFreeReset   DateTime  @default(now())
+
+  // Firebase Push Token
+  fcmToken        String?
+  
+  // Relations
+  wallet          Wallet?
+  expert          Expert?
+  counselor       Counselor?
+  chatSessions    ChatSession[]     @relation("UserSessions")
+  messages        ChatMessage[]
+  favorites       FavoriteExpert[]
+  reviews         ExpertReview[]
+  notifications   Notification[]
+  freeAllocations FreeAllocation[]
+  adminAlerts     AdminAlert[]
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([role])
+  @@index([phone])
+}
+
+// SRS §1.3 — Early Bird Whitelist
+model EarlyBirdWhitelist {
+  id        String   @id @default(uuid())
+  phone     String   @unique
+  addedBy   String?  // Admin who added
+  createdAt DateTime @default(now())
+}
+
+// SRS §3.4 — Free Allocation (partitioned chat/call minutes)
+model FreeAllocation {
+  id                String   @id @default(uuid())
+  userId            String
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  allocDate         DateTime @default(now()) @db.Date
+  chatMinutesTotal  Int      @default(5)
+  chatMinutesUsed   Int      @default(0)
+  callMinutesTotal  Int      @default(5)
+  callMinutesUsed   Int      @default(0)
+  createdAt         DateTime @default(now())
+
+  @@unique([userId, allocDate])
+  @@index([userId])
+}
+
+model Expert {
+  id                String        @id @default(uuid())
+  userId            String        @unique
+  user              User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  displayName       String
+  profileImage      String?
+  bio               String?       @db.Text
+  shortBio          String?
+  specializations   String[]
+  languages         String[]
+  experience        Int           @default(0)
+  education         String?
+  location          String?
+  category          String?       // Dynamic Category Code (e.g. STAR_AND_FUTURE)
+  
+  // Pricing
+  pricePerMinute    Float         @default(10)
+  
+  // Verification & Status (SRS §8.4)
+  status            ExpertStatus  @default(PENDING)
+
+  documents         ExpertDocument[]
+  
+  // Availability
+  isOnline          Boolean       @default(false)
+  onlineStatus      OnlineStatus  @default(offline)
+  lastSeen          DateTime      @default(now())
+  
+  // Dil Ki Baat — Listener Pool (SRS §2.3, §8)
+  isListener        Boolean       @default(false)
+  listenerTags      String[]      @default([])
+  
+  // Dummy profile flag (SRS §9.4)
+  isDummyProfile    Boolean       @default(false)
+  
+  // Stats
+  totalSessions     Int           @default(0)
+  totalMinutes      Int           @default(0)
+  avgRating         Float         @default(0)
+  totalEarnings     Float         @default(0)
+  
+  // Commission
+  commissionPercent Float?
+  
+  // Bank Details
+  bankName          String?
+  accountNumber     String?
+  ifscCode          String?
+  upiId             String?
+  
+  // Relations
+  chatSessions      ChatSession[] @relation("ExpertSessions")
+  reviews           ExpertReview[]
+  favorites         FavoriteExpert[]
+  payouts           Payout[]
+  gigApplications   GigApplication[]
+  
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  @@index([status])
+  @@index([isOnline])
+  @@index([isListener])
+}
+
+model ExpertDocument {
+  id          String   @id @default(uuid())
+  expertId    String
+  expert      Expert   @relation(fields: [expertId], references: [id], onDelete: Cascade)
+  type        String   // AADHAAR, PAN, CERTIFICATE, PHOTO, VIDEO
+  url         String
+  verified    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+}
+
+model Counselor {
+  id                String   @id @default(uuid())
+  userId            String   @unique
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  displayName       String
+  bio               String?  @db.Text
+  languages         String[]
+  
+  isOnline          Boolean  @default(false)
+  isApproved        Boolean  @default(false)
+  
+  totalSessions     Int      @default(0)
+  totalMinutes      Int      @default(0)
+  avgRating         Float    @default(0)
+  
+  chatSessions      ChatSession[] @relation("CounselorSessions")
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+model Wallet {
+  id            String              @id @default(uuid())
+  userId        String              @unique
+  user              User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  balance       Float               @default(0)
+  totalRecharged Float              @default(0)
+  totalSpent    Float               @default(0)
+  transactions  WalletTransaction[]
+  
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+}
+
+model WalletTransaction {
+  id                String            @id @default(uuid())
+  walletId          String
+  wallet            Wallet            @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  
+  amount            Float
+  type              TransactionType
+  status            TransactionStatus @default(PENDING)
+  description       String?
+  
+  razorpayOrderId   String?           @unique
+  razorpayPaymentId String?           @unique
+  razorpaySignature String?
+  
+  chatSessionId     String?
+  
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  @@index([walletId])
+  @@index([type, status])
+}
+
+model ChatSession {
+  id              String        @id @default(uuid())
+  
+  userId          String
+  user            User          @relation("UserSessions", fields: [userId], references: [id])
+  
+  expertId        String?
+  expert          Expert?       @relation("ExpertSessions", fields: [expertId], references: [id])
+  
+  counselorId     String?
+  counselor       Counselor?    @relation("CounselorSessions", fields: [counselorId], references: [id])
+  
+  type            SessionType   @default(CHAT)
+  status          SessionStatus @default(WAITING)
+  
+  // Billing
+  pricePerMinute  Float         @default(0)
+  totalMinutes    Float         @default(0)
+  totalAmount     Float         @default(0)
+  isFreeSession   Boolean       @default(false)
+  freeMinutesUsed Int           @default(0)
+  
+  // Pre-chat intake (SRS §3.1)
+  intakeData      Json?
+  
+  // Locked History Hook (SRS §5)
+  isLocked        Boolean       @default(false)
+  isUnlocked      Boolean       @default(false)
+  unlockedAt      DateTime?
+  
+  // Privacy
+  isAnonymous     Boolean       @default(false)
+  
+  // Timestamps
+  startedAt       DateTime?
+  lastBilledAt    DateTime?
+  endedAt         DateTime?
+  
+  messages        ChatMessage[]
+  
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@index([status])
+  @@index([userId, status])
+  @@index([expertId, status])
+  @@index([counselorId])
+  @@index([updatedAt])
+}
+
+model ChatMessage {
+  id            String      @id @default(uuid())
+  sessionId     String
+  session       ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  
+  senderId      String
+  sender        User        @relation(fields: [senderId], references: [id])
+  
+  content       String      @db.Text
+  messageType   String      @default("TEXT")
+  isRead        Boolean     @default(false)
+  isEdited      Boolean     @default(false)
+  isFiltered    Boolean     @default(false) // SRS §6.1 — was this message filtered?
+  
+  hiddenForId   String[]    @default([])
+  adminInterventionId String?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@index([sessionId, createdAt])
+  @@index([senderId])
+}
+
+model FavoriteExpert {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expertId  String
+  expert    Expert   @relation(fields: [expertId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, expertId])
+}
+
+model ExpertReview {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expertId  String
+  expert    Expert   @relation(fields: [expertId], references: [id], onDelete: Cascade)
+  rating    Int
+  comment   String?  @db.Text
+  createdAt DateTime @default(now())
+}
+
+model Payout {
+  id          String            @id @default(uuid())
+  expertId    String
+  expert      Expert            @relation(fields: [expertId], references: [id])
+  amount      Float
+  status      TransactionStatus @default(PENDING)
+  processedAt DateTime?
+  createdAt   DateTime          @default(now())
+}
+
+model DailyContent {
+  id          String      @id @default(uuid())
+  type        ContentType
+  title       String
+  content     String      @db.Text
+  author      String?
+  mediaUrl    String?
+  imageUrl    String?     // Legacy compatibility
+  zodiacSign  String?
+  isActive    Boolean     @default(true)
+  priority    Int         @default(0)
+  publishDate DateTime    @default(now())
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+}
+
+model Poll {
+  id          String       @id @default(uuid())
+  question    String
+  options     Json
+  isActive    Boolean      @default(true)
+  expiresAt   DateTime?
+  responses   PollResponse[]
+  createdAt   DateTime     @default(now())
+}
+
+model PollResponse {
+  id        String   @id @default(uuid())
+  pollId    String
+  poll      Poll     @relation(fields: [pollId], references: [id], onDelete: Cascade)
+  userId    String
+  optionId  String
+  createdAt DateTime @default(now())
+
+  @@unique([pollId, userId])
+}
+
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  message   String
+  type      String   @default("GENERAL")
+  isRead    Boolean  @default(false)
+  data      Json?
+  createdAt DateTime @default(now())
+
+  @@index([userId, isRead])
+}
+
+// SRS §9.6 — Red Alert System for Anti-Leakage
+model AdminAlert {
+  id              String   @id @default(uuid())
+  type            String   // CONTACT_SHARING, SUSPICIOUS_ACTIVITY, etc.
+  userId          String?
+  user            User?    @relation(fields: [userId], references: [id])
+  sessionId       String?
+  blockedContent  String?  @db.Text
+  matchedPatterns String[] @default([])
+  isResolved      Boolean  @default(false)
+  resolvedBy      String?
+  resolvedAt      DateTime?
+  createdAt       DateTime @default(now())
+
+  @@index([isResolved])
+  @@index([createdAt])
+}
+
+model AdminSettings {
+  id                       String   @id @default("global")
+  platformCommissionPercent Float    @default(30)
+  freeMinutesSignup        Int      @default(5)
+  freeMinutesDailySOS      Int      @default(10)
+  minRechargeAmount        Float    @default(50)
+  lowBalanceThreshold      Float    @default(20)
+  
+  // SRS §3.2 — Free minutes reset mode
+  freeMinutesResetType     String   @default("one_time") // 'one_time' | 'daily'
+  
+  // SRS §9.4 — SOS master switch
+  sosEnabled               Boolean  @default(true)
+  
+  // SRS §2B.2 — Student Zone title toggle
+  studentZoneTitle         String   @default("Student Safe Space")
+  
+  updatedAt                DateTime @updatedAt
+}
+
+// SRS §7 — Expert Gigs (B2B)
+model Gig {
+  id            String    @id @default(uuid())
+  postedBy      String    // Expert userId
+  title         String
+  description   String    @db.Text
+  budgetRange   String?   // e.g., '500-1000/session'
+  skillsNeeded  String[]  @default([])
+  status        GigStatus @default(OPEN)
+  expiresAt     DateTime?
+  applications  GigApplication[]
+  category      String    @default("General")
+  urgency       String    @default("Normal")
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([status])
+  @@index([postedBy])
+}
+
+model GigApplication {
+  id          String   @id @default(uuid())
+  gigId       String
+  gig         Gig      @relation(fields: [gigId], references: [id], onDelete: Cascade)
+  applicantId String   // Expert userId
+  applicant   Expert   @relation(fields: [applicantId], references: [userId], onDelete: Cascade)
+  message     String?  @db.Text
+  status      String   @default("PENDING") // PENDING, ACCEPTED, REJECTED
+  createdAt   DateTime @default(now())
+
+  @@unique([gigId, applicantId])
+}
+
+model Dispute {
+  id            String        @id @default(uuid())
+  chatSessionId String
+  reportedBy    String
+  reason        String        @db.Text
+  status        DisputeStatus @default(OPEN)
+  resolution    String?       @db.Text
+  resolvedAt    DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+}
+
+model SecurityLog {
+  id        String   @id @default(uuid())
+  userId    String?
+  action    String
+  ip        String?
+  userAgent String?
+  details   Json?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([createdAt])
+}
+
+// ─────────────────────────── MASTER DATA ───────────────────────────
+
+model ExpertCategoryMaster {
+  id          String              @id @default(uuid())
+  name        String              @unique // display name: "Star & Future"
+  code        String              @unique // unique identifier: "STAR_AND_FUTURE"
+  description String?
+  isActive    Boolean             @default(true)
+  skills      ExpertSkillMaster[]
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+}
+
+model ExpertSkillMaster {
+  id          String               @id @default(uuid())
+  name        String
+  categoryId  String
+  category    ExpertCategoryMaster @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  isActive    Boolean              @default(true)
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+
+  @@unique([name, categoryId])
+}
