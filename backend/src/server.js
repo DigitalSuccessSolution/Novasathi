@@ -64,8 +64,8 @@ app.use('/api/v1/gigs', gigRoutes);
 app.get('/', (req, res) => {
   res.send(`
     <body style="background:#0a0a0a; color:#fff; font-family:sans-serif; display:flex; flex-direction:column; align-items:center; justify-content:center; height:100vh; text-align:center;">
-      <h1 style="color:#a855f7;">🌌 NovaSathi API Sanctuary</h1>
-      <p style="color:#666;">The API sanctuary is open and humming through the digital void.</p>
+      <h1 style="color:#a855f7;">🌌 NovaSathi API Server</h1>
+      <p style="color:#666;">The API server is online and operational.</p>
       <p style="margin-top:20px;"><a href="/health" style="color:#a855f7;">Check Operational Status</a></p>
     </body>
   `);
@@ -94,7 +94,7 @@ server.listen(PORT, async () => {
   // Test DB connection
   try {
     await prisma.$connect();
-    console.log('✅ Connected to NovaSathi DB Matrix');
+    console.log('✅ Database connected successfully');
     
     // Seed admin global settings if not exists
     await prisma.adminSettings.upsert({

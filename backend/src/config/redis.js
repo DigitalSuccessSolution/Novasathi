@@ -4,13 +4,21 @@ let redis;
 
 try {
   redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
-    maxRetriesPerRequest: 3,
-    retryDelayOnFailover: 100,
+    maxRetriesPerRequest: null, // Allow infinite retries in background without crashing
+    retryStrategy: (times) => {
+      if (times > 3) return null; // Stop trying after 3 times and trigger error
+      return Math.min(times * 100, 3000);
+    },
     lazyConnect: true,
   });
 
-  redis.on('connect', () => console.log('✅ Redis connected'));
-  redis.on('error', (err) => console.error('❌ Redis error:', err.message));
+  redis.on('connect', () => {
+    console.log('✅ Redis connected successfully');
+  });
+
+  redis.on('error', (err) => {
+    console.error('❌ Redis connection error:', err.message);
+  });
 } catch (err) {
   console.warn('⚠️  Redis not available, using in-memory fallback');
   // In-memory fallback for development without Redis

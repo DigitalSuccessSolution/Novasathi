@@ -27,7 +27,7 @@ class NotificationEngine {
           title,
           message,
           type,
-          metadata: metadata ? JSON.stringify(metadata) : null,
+          data: metadata || {},
           isRead: false
         }
       });

@@ -3,10 +3,15 @@ const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const multer = require('multer');
 
 cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME || 'dcwxxxxxxxx',
-  api_key: process.env.CLOUDINARY_API_KEY || 'xxxxxxxxxxxxxxxxxxx',
-  api_secret: process.env.CLOUDINARY_API_SECRET || 'xxxxxxxxxxxxxxxxxxxxxxxxx',
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
 });
+
+// Test Cloudinary connection
+cloudinary.api.ping()
+  .then(() => console.log('✅ Cloudinary connected successfully'))
+  .catch((err) => console.warn('⚠️  Cloudinary connection failed:', err.message));
 
 const storage = new CloudinaryStorage({
   cloudinary: cloudinary,

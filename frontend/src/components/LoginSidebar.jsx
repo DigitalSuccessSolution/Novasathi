@@ -1,11 +1,13 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Loader2, X, ArrowLeft } from "lucide-react";
+import { RecaptchaVerifier, signInWithPhoneNumber } from "firebase/auth";
+import { auth } from "../lib/firebase";
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "../context/ToastContext";
 
 const LoginSidebar = () => {
-  const { isLoginModalOpen, setIsLoginModalOpen, login, verifyOtp } = useAuth();
+  const { isLoginModalOpen, setIsLoginModalOpen, loginWithFirebase } = useAuth();
   const { toast } = useToast();
 
   const [phone, setPhone] = useState("");
@@ -13,6 +15,9 @@ const LoginSidebar = () => {
   const [step, setStep] = useState("phone");
   const [loading, setLoading] = useState(false);
   const [timer, setTimer] = useState(0);
+  const [confirmationResult, setConfirmationResult] = useState(null);
+  
+  const recaptchaRef = useRef(null);
 
   useEffect(() => {
     let interval;
@@ -20,19 +25,39 @@ const LoginSidebar = () => {
     return () => clearInterval(interval);
   }, [timer]);
 
+  const setupRecaptcha = () => {
+    if (window.recaptchaVerifier) {
+      window.recaptchaVerifier.clear();
+    }
+    window.recaptchaVerifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
+      'size': 'invisible',
+      'callback': (response) => {
+        // reCAPTCHA solved, allow signInWithPhoneNumber.
+      }
+    });
+  };
+
   const handleSendOtp = async (e) => {
     if (e) e.preventDefault();
     const cleanPhone = phone.replace(/\D/g, '');
     if (cleanPhone.length !== 10) return toast("Enter a valid 10-digit number", "error");
     
+    const phoneNumber = `+91${cleanPhone}`;
+    
     try {
       setLoading(true);
-      await login(cleanPhone);
+      setupRecaptcha();
+      const appVerifier = window.recaptchaVerifier;
+      
+      const result = await signInWithPhoneNumber(auth, phoneNumber, appVerifier);
+      setConfirmationResult(result);
       setStep("otp");
-      setTimer(30);
-      toast("OTP sent! Check your terminal console.", "success");
+      setTimer(60);
+      toast("OTP sent via SMS!", "success");
     } catch (err) {
+      console.error("Firebase Auth Error:", err);
       toast("Error sending OTP. Please try again.", "error");
+      if (window.recaptchaVerifier) window.recaptchaVerifier.clear();
     } finally {
       setLoading(false);
     }
@@ -41,14 +66,20 @@ const LoginSidebar = () => {
   const handleVerifyOtp = async (e) => {
     e.preventDefault();
     if (otp.length < 6) return toast("Enter 6-digit OTP", "error");
+    if (!confirmationResult) return toast("Session expired. Try again.", "error");
 
     try {
       setLoading(true);
-      await verifyOtp(phone.replace(/\D/g, ''), otp);
+      const result = await confirmationResult.confirm(otp);
+      const idToken = await result.user.getIdToken();
+      
+      await loginWithFirebase(idToken);
+      
       toast("Logged In Successfully", "success");
       setIsLoginModalOpen(false);
       resetFlow();
     } catch (err) {
+      console.error("Verification Error:", err);
       toast("Invalid OTP code", "error");
     } finally {
       setLoading(false);
@@ -56,7 +87,8 @@ const LoginSidebar = () => {
   };
 
   const resetFlow = () => {
-    setStep("phone"); setPhone(""); setOtp("");
+    setStep("phone"); setPhone(""); setOtp(""); setConfirmationResult(null);
+    if (window.recaptchaVerifier) window.recaptchaVerifier.clear();
   };
 
   return (
@@ -73,6 +105,7 @@ const LoginSidebar = () => {
             initial={{ x: "100%" }} animate={{ x: 0 }} exit={{ x: "100%" }}
             className="fixed right-0 top-0 h-full w-full sm:w-[380px] bg-[#0f1115] z-[1001] shadow-2xl flex flex-col p-8 text-white border-l border-white/5"
           >
+            <div id="recaptcha-container"></div>
             <div className="flex justify-between items-center mb-10">
               <h2 className="text-xl font-bold tracking-tight">Login or Signup</h2>
               <button onClick={() => setIsLoginModalOpen(false)} className="p-2 hover:bg-white/5 rounded-full transition-colors text-white/40 hover:text-white">

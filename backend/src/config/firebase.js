@@ -23,14 +23,17 @@ const initializeFirebase = () => {
             return null;
         }
 
-        return admin.initializeApp({
+        const app = admin.initializeApp({
             credential: admin.credential.cert(serviceAccount)
         });
+        
+        console.log('✅ Firebase Admin initialized successfully');
+        return app;
     } catch (err) {
-        console.error("🔥 [FIREBASE_INIT_ERROR]", err.message);
+        console.error("❌ Firebase initialization error:", err.message);
         return null;
     }
-};
+}
 
 const firebaseApp = initializeFirebase();
 
