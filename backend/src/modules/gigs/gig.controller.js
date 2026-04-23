@@ -1,219 +1,160 @@
-const { PrismaClient } = require("../../generated/client");
-const prisma = new PrismaClient();
+const prisma = require("../../config/prisma");
+const catchAsync = require("../../utils/catchAsync");
+const AppError = require("../../utils/AppError");
+const ApiResponse = require("../../utils/ApiResponse");
 const { filterMessage: filterContent } = require("../../middleware/chatFilter");
 
 /**
- * SRS §7.2 - Expert Gigs CRUD Logic
+ * NovaSathi Gig Controller — Scalable B2B Networking
+ * Handles creation, application, and lifecycle of expert-to-expert gigs.
  */
 
 // Create a new Gig (Expert Only)
-const createGig = async (req, res) => {
-  try {
-    const { title, description, budgetRange, skillsNeeded, category, urgency } = req.body;
-    const expertId = req.user.id; // From auth middleware
+exports.createGig = catchAsync(async (req, res, next) => {
+  const { title, description, budgetRange, skillsNeeded, category, urgency } = req.body;
+  const expertId = req.user.id;
 
-    // Validate expert status (SRS §7.1) - Allow Admins to skip this
-    if (req.user.role !== 'ADMIN') {
-        const expert = await prisma.expert.findUnique({ where: { userId: expertId } });
-        if (!expert || expert.status !== 'APPROVED') {
-            return res.status(403).json({ success: false, message: "Only approved experts can post gigs." });
-        }
+  // Validate expert status (SRS §7.1)
+  if (req.user.role !== 'ADMIN') {
+    const expert = await prisma.expert.findUnique({ where: { userId: expertId } });
+    if (!expert || expert.status !== 'APPROVED') {
+      return next(new AppError("Only approved experts can post gigs.", 403));
     }
-
-    // SRS §7.5 Anti-Leakage in Gigs
-    const filteredDescription = filterContent(description);
-    if (filteredDescription.isFiltered) {
-      // Logic for Red Alert can be added here
-      return res.status(400).json({ success: false, message: "Content contains restricted information (phone/WhatsApp)." });
-    }
-
-    const gig = await prisma.gig.create({
-      data: {
-        postedBy: expertId,
-        title,
-        description,
-        budgetRange,
-        category: category || "General",
-        urgency: urgency || "Normal",
-        skillsNeeded: skillsNeeded || [],
-        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) // Default 7 days
-      }
-    });
-
-    res.status(201).json({ success: true, data: gig });
-  } catch (err) {
-    console.error("🔥 [CREATE_GIG_ERROR]", err);
-    res.status(500).json({ success: false, message: "Internal server error" });
   }
-};
+
+  // Anti-Leakage (SRS §7.5)
+  const filtered = filterContent(description);
+  if (filtered.isFiltered) {
+    return next(new AppError("Content contains restricted information (phone/WhatsApp).", 400));
+  }
+
+  const gig = await prisma.gig.create({
+    data: {
+      postedBy: expertId,
+      title,
+      description,
+      budgetRange,
+      category: category || "General",
+      urgency: urgency || "Normal",
+      skillsNeeded: skillsNeeded || [],
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+    }
+  });
+
+  res.status(201).json(new ApiResponse(201, gig, "Gig created successfully"));
+});
 
 // List Gigs with server-side filtering
-const getGigFeed = async (req, res) => {
-  try {
-    const { view } = req.query;
-    const userId = req.user.id;
-    const isAdmin = req.user.role === 'ADMIN';
+exports.getGigFeed = catchAsync(async (req, res, next) => {
+  const { view } = req.query;
+  const userId = req.user.id;
+  const isAdmin = req.user.role === 'ADMIN';
 
-    let filter = {};
+  let filter = {};
 
-    // Server-side filtering logic
-    if (view === 'my_gigs') {
-      // Show ALL projects posted by this user (including closed ones)
-      filter = { postedBy: userId };
-    } else if (view === 'my_applications') {
-      // Show projects where this user has applied
-      filter = { applications: { some: { applicantId: userId } } };
-    } else {
-      // Default Feed: Admins see everything, Experts only see OPEN & ACTIVE projects
-      if (!isAdmin) {
-        filter = { 
-          status: 'OPEN',
-          expiresAt: { gt: new Date() }
-        };
-      }
+  if (view === 'my_gigs') {
+    filter = { postedBy: userId };
+  } else if (view === 'my_applications') {
+    filter = { applications: { some: { applicantId: userId } } };
+  } else {
+    if (!isAdmin) {
+      filter = { 
+        status: 'OPEN',
+        expiresAt: { gt: new Date() }
+      };
     }
+  }
 
-    const gigs = await prisma.gig.findMany({
-      where: filter,
-      orderBy: { createdAt: 'desc' },
-      include: {
-        applications: {
-          include: {
-            applicant: {
-              select: {
-                displayName: true,
-                profileImage: true,
-                location: true,
-                experience: true,
-                specializations: true,
-                user: {
-                  select: { phone: true }
-                }
-              }
+  const gigs = await prisma.gig.findMany({
+    where: filter,
+    orderBy: { createdAt: 'desc' },
+    include: {
+      applications: {
+        include: {
+          applicant: {
+            select: {
+              displayName: true,
+              profileImage: true,
+              location: true,
+              experience: true,
+              specializations: true,
             }
           }
         }
       }
-    });
+    }
+  });
 
-    // Map to include expert info (postedBy is userId)
-    const gigsWithExpert = await Promise.all(gigs.map(async (gig) => {
-        const poster = await prisma.expert.findUnique({
-            where: { userId: gig.postedBy },
-            select: { displayName: true, profileImage: true, location: true }
-        });
-        return { ...gig, poster };
-    }));
+  // Optimize: Batch fetch posters instead of map+findUnique
+  const posterIds = [...new Set(gigs.map(g => g.postedBy))];
+  const posters = await prisma.expert.findMany({
+    where: { userId: { in: posterIds } },
+    select: { userId: true, displayName: true, profileImage: true, location: true }
+  });
 
-    res.json({ success: true, data: gigsWithExpert });
-  } catch (err) {
-    console.error("🔥 [GET_GIGS_ERROR]", err);
-    res.status(500).json({ success: false, message: "Internal server error" });
+  const posterMap = Object.fromEntries(posters.map(p => [p.userId, p]));
+
+  const data = gigs.map(gig => ({
+    ...gig,
+    poster: posterMap[gig.postedBy]
+  }));
+
+  res.status(200).json(new ApiResponse(200, data, "Gig feed retrieved"));
+});
+
+// Apply to a Gig
+exports.applyToGig = catchAsync(async (req, res, next) => {
+  const { gigId, message } = req.body;
+  const applicantId = req.user.id;
+
+  const gig = await prisma.gig.findUnique({ where: { id: gigId } });
+  if (!gig || gig.status !== 'OPEN') {
+    return next(new AppError("Gig not found or closed.", 404));
   }
-};
 
-// Apply to a Gig (Expert Only)
-const applyToGig = async (req, res) => {
-  try {
-    const { gigId, message } = req.body;
-    const applicantId = req.user.id;
-
-    const gig = await prisma.gig.findUnique({ where: { id: gigId } });
-    if (!gig || gig.status !== 'OPEN') {
-      return res.status(404).json({ success: false, message: "Gig not found or closed." });
-    }
-
-    if (gig.postedBy === applicantId) {
-      return res.status(400).json({ success: false, message: "You cannot apply to your own gig." });
-    }
-
-    // SRS §7.5 Anti-Leakage in Application
-    if (message) {
-      const filteredMessage = filterContent(message);
-      if (filteredMessage.isFiltered) {
-        return res.status(400).json({ success: false, message: "Application contains restricted info." });
-      }
-    }
-
-    const application = await prisma.gigApplication.create({
-      data: {
-        gigId,
-        applicantId,
-        message
-      }
-    });
-
-    res.status(201).json({ success: true, data: application });
-  } catch (err) {
-    if (err.code === 'P2002') {
-        return res.status(400).json({ success: false, message: "You have already applied to this gig." });
-    }
-    console.error("🔥 [APPLY_GIG_ERROR]", err);
-    res.status(500).json({ success: false, message: "Internal server error" });
+  if (gig.postedBy === applicantId) {
+    return next(new AppError("You cannot apply to your own gig.", 400));
   }
-};
 
-// Update Gig Status (Poster only)
-const updateGig = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { status, title, description, budgetRange, skillsNeeded, category, urgency } = req.body;
-    const expertId = req.user.id;
-
-    const gig = await prisma.gig.findUnique({ where: { id } });
-    if (!gig) return res.status(404).json({ success: false, message: "Gig not found" });
-
-    // Allow owner or Admin to update
-    if (gig.postedBy !== expertId && req.user.role !== 'ADMIN') {
-      return res.status(403).json({ success: false, message: "Unauthorized." });
-    }
-
-    const updateData = {};
-    if (status) updateData.status = status;
-    if (title) updateData.title = title;
-    if (description) updateData.description = description;
-    if (budgetRange) updateData.budgetRange = budgetRange;
-    if (skillsNeeded) updateData.skillsNeeded = Array.isArray(skillsNeeded) ? skillsNeeded : skillsNeeded.split(',').map(s => s.trim());
-    if (category) updateData.category = category;
-    if (urgency) updateData.urgency = urgency;
-
-    const updatedGig = await prisma.gig.update({
-      where: { id },
-      data: updateData
-    });
-
-    res.json({ success: true, data: updatedGig });
-  } catch (err) {
-    console.error("🔥 [UPDATE_GIG_ERROR]", err);
-    res.status(500).json({ success: false, message: "Internal server error" });
+  if (message && filterContent(message).isFiltered) {
+    return next(new AppError("Application contains restricted info.", 400));
   }
-};
 
-const deleteGig = async (req, res) => {
-    try {
-        const { id } = req.params;
-        const userId = req.user.id;
+  const application = await prisma.gigApplication.create({
+    data: { gigId, applicantId, message }
+  });
 
-        const gig = await prisma.gig.findUnique({ where: { id } });
-        if (!gig) return res.status(404).json({ success: false, message: "Gig not found" });
+  res.status(201).json(new ApiResponse(201, application, "Application submitted"));
+});
 
-        // Allow owner or Admin to delete
-        if (gig.postedBy !== userId && req.user.role !== 'ADMIN') {
-            return res.status(403).json({ success: false, message: "Unauthorized" });
-        }
+// Update Gig
+exports.updateGig = catchAsync(async (req, res, next) => {
+  const { id } = req.params;
+  const gig = await prisma.gig.findUnique({ where: { id } });
+  
+  if (!gig) return next(new AppError("Gig not found", 404));
+  if (gig.postedBy !== req.user.id && req.user.role !== 'ADMIN') {
+    return next(new AppError("Unauthorized", 403));
+  }
 
-        await prisma.gig.delete({ where: { id } });
-        res.json({ success: true, message: "Gig deleted successfully" });
-    } catch (err) {
-        console.error("🔥 [DELETE_GIG_ERROR]", err);
-        res.status(500).json({ success: false, message: "Internal server error" });
-    }
-};
+  const updatedGig = await prisma.gig.update({
+    where: { id },
+    data: req.body
+  });
 
-module.exports = {
-  createGig,
-  getGigFeed,
-  applyToGig,
-  updateGig,
-  deleteGig
-};
+  res.status(200).json(new ApiResponse(200, updatedGig, "Gig updated successfully"));
+});
+
+// Delete Gig
+exports.deleteGig = catchAsync(async (req, res, next) => {
+  const { id } = req.params;
+  const gig = await prisma.gig.findUnique({ where: { id } });
+  
+  if (!gig) return next(new AppError("Gig not found", 404));
+  if (gig.postedBy !== req.user.id && req.user.role !== 'ADMIN') {
+    return next(new AppError("Unauthorized", 403));
+  }
+
+  await prisma.gig.delete({ where: { id } });
+  res.status(200).json(new ApiResponse(200, null, "Gig deleted successfully"));
+});

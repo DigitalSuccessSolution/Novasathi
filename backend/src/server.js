@@ -127,11 +127,52 @@ server.listen(PORT, async () => {
   }
 });
 
-// Handle unhandled rejections
-process.on('unhandledRejection', (err) => {
-  console.error('UNHANDLED REJECTION! 💥 Shutting down...');
-  console.error(err);
-  server.close(() => process.exit(1));
+// Graceful shutdown logic
+const gracefulShutdown = (signal) => {
+  console.log(`🛑 [${signal}] signal received. Shutting down gracefully...`);
+  
+  server.close(async () => {
+    console.log('🚪 [HTTP] Server closed.');
+    
+    try {
+      await prisma.$disconnect();
+      console.log('💾 [DB] Prisma disconnected.');
+      
+      const redis = require('./config/redis');
+      if (redis.quit) {
+        await redis.quit();
+        console.log('🔴 [REDIS] Connection closed.');
+      }
+      
+      process.exit(signal === 'SIGTERM' || signal === 'SIGINT' ? 0 : 1);
+    } catch (err) {
+      console.error('❌ Error during shutdown:', err.message);
+      process.exit(1);
+    }
+  });
+
+  setTimeout(() => {
+    console.error('⏳ Forcefully shutting down after timeout');
+    process.exit(1);
+  }, 10000);
+};
+
+// Global Error Listeners
+process.on('uncaughtException', (err) => {
+  console.error('🔥 UNCAUGHT EXCEPTION! Shutting down...');
+  console.error(err.name, err.message);
+  console.error(err.stack);
+  gracefulShutdown('uncaughtException');
 });
+
+process.on('unhandledRejection', (err) => {
+  console.error('💥 UNHANDLED REJECTION! Shutting down...');
+  console.error(err.name, err.message);
+  console.error(err.stack);
+  gracefulShutdown('unhandledRejection');
+});
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 module.exports = server;

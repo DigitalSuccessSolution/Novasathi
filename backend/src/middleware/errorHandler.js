@@ -21,9 +21,13 @@ module.exports = (err, req, res, next) => {
   err.statusCode = err.statusCode || 500;
   err.status = err.status || 'error';
 
-  // Log in dev
+  // Log error for server monitoring
   if (process.env.NODE_ENV === 'development') {
     console.error('❌ ERROR:', err);
+  } else if (err.statusCode >= 500) {
+    // In production, only log critical errors to avoid log spamming
+    console.error(`🔥 [CRITICAL] ${req.method} ${req.originalUrl}:`, err.message);
+    if (err.stack) console.error(err.stack);
   }
 
   let error = { ...err, message: err.message, stack: err.stack };

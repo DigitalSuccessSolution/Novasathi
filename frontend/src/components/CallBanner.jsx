@@ -2,6 +2,7 @@ import React from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { PhoneOff, Mic, MicOff, Maximize2 } from 'lucide-react';
 import { useCall } from '../context/CallContext';
+import { formatTime } from '../utils/formatTime';
 
 const CallBanner = () => {
   const { 
@@ -16,12 +17,7 @@ const CallBanner = () => {
     callType
   } = useCall();
 
-  const formatTime = (seconds) => {
-    if (seconds === null) return "--:--";
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-  };
+
 
   if (!callActive || !isMinimized) return null;
 

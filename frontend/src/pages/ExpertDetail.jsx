@@ -19,6 +19,8 @@ import { useAuth } from "../context/AuthContext";
 import { useToast } from "../context/ToastContext";
 import { useCall } from "../context/CallContext";
 import IntakeForm from "../components/IntakeForm";
+import StatusPopup from "../components/StatusPopup";
+import socket from "../lib/socket";
 
 const ExpertDetail = () => {
     const { id } = useParams();
@@ -33,6 +35,7 @@ const ExpertDetail = () => {
     // Intake Form State
     const [isIntakeOpen, setIsIntakeOpen] = useState(false);
     const [intakeType, setIntakeType] = useState('CHAT');
+    const [statusModal, setStatusModal] = useState({ open: false, type: 'busy' });
 
     const fetchExpertDetail = async () => {
         try {
@@ -50,11 +53,38 @@ const ExpertDetail = () => {
 
     useEffect(() => {
         fetchExpertDetail();
+
+        // Listen for real-time status updates
+        const handleStatusUpdate = ({ expertId, status }) => {
+            if (id === expertId) {
+                setExpert(prev => prev ? { 
+                    ...prev, 
+                    onlineStatus: status,
+                    isOnline: status !== 'offline'
+                } : prev);
+            }
+        };
+
+        socket.on('expert_status_update', handleStatusUpdate);
+
+        return () => {
+            socket.off('expert_status_update', handleStatusUpdate);
+        };
     }, [id]);
 
     const openIntake = (type = 'CHAT') => {
         if (!token) {
             setIsLoginModalOpen(true);
+            return;
+        }
+
+        if (expert.onlineStatus === 'busy') {
+            setStatusModal({ open: true, type: 'busy' });
+            return;
+        }
+
+        if (!expert.isOnline) {
+            setStatusModal({ open: true, type: 'offline' });
             return;
         }
 
@@ -144,10 +174,10 @@ const ExpertDetail = () => {
                                         alt={expert.displayName}
                                         className="w-32 h-32 md:w-36 md:h-36 rounded-full object-cover border-4 border-[#0d0f17]"
                                     />
-                                    {expert.isOnline && (
-                                        <div className="absolute -bottom-1 right-2 flex items-center gap-1.5 px-3 py-1 bg-[#161922] border border-emerald-500/20 rounded-full shadow-lg">
-                                            <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
-                                            <span className="text-[10px] font-medium text-emerald-500 ">online</span>
+                                    {(expert.isOnline || expert.onlineStatus === 'busy') && (
+                                        <div className={`absolute -bottom-1 right-2 flex items-center gap-1.5 px-3 py-1 bg-[#161922] border ${expert.onlineStatus === 'busy' ? 'border-amber-500/20' : 'border-emerald-500/20'} rounded-full shadow-lg`}>
+                                            <div className={`w-1.5 h-1.5 ${expert.onlineStatus === 'busy' ? 'bg-amber-500' : 'bg-emerald-500 animate-pulse'} rounded-full`} />
+                                            <span className={`text-[10px] font-medium ${expert.onlineStatus === 'busy' ? 'text-amber-500' : 'text-emerald-500'} `}>{expert.onlineStatus === 'busy' ? 'busy' : 'online'}</span>
                                         </div>
                                     )}
                                 </div>
@@ -248,23 +278,35 @@ const ExpertDetail = () => {
 
                             <div className="space-y-3">
                                 <button 
-                                    onClick={() => openIntake('CHAT')}
-                                    className="w-full py-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-sm transition-all shadow-xl shadow-indigo-600/20 active:scale-95 flex items-center justify-center gap-2"
+                                    onClick={() => { if(expert.onlineStatus !== 'busy') openIntake('CHAT'); }}
+                                    className={`w-full py-4 rounded-xl font-medium text-sm transition-all shadow-xl active:scale-95 flex items-center justify-center gap-2 ${
+                                        expert.onlineStatus === 'busy'
+                                        ? "bg-amber-500/10 text-amber-500 border border-amber-500/20 cursor-wait shadow-none"
+                                        : "bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-600/20"
+                                    }`}
                                 >
                                     <MessageSquare size={18} />
-                                    start chat
+                                    {expert.onlineStatus === 'busy' ? 'expert is busy' : 'start chat'}
                                 </button>
                                 <div className="grid grid-cols-2 gap-3">
                                     <button 
-                                        onClick={() => openIntake('CALL')}
-                                        className="py-4 rounded-xl bg-[#161922] border border-white/5 hover:bg-white/5 text-slate-400 transition-all active:scale-95 flex items-center justify-center gap-2"
+                                        onClick={() => { if(expert.onlineStatus !== 'busy') openIntake('CALL'); }}
+                                        className={`py-4 rounded-xl border border-white/5 transition-all active:scale-95 flex items-center justify-center gap-2 ${
+                                            expert.onlineStatus === 'busy'
+                                            ? "bg-amber-500/5 text-amber-500/50 border-amber-500/10 cursor-wait"
+                                            : "bg-[#161922] hover:bg-white/5 text-slate-400"
+                                        }`}
                                     >
                                         <Phone size={16} />
                                         <span className="text-xs font-medium">call</span>
                                     </button>
                                     <button 
-                                        onClick={() => openIntake('VIDEO')}
-                                        className="py-4 rounded-xl bg-[#161922] border border-white/5 hover:bg-white/5 text-slate-400 transition-all active:scale-95 flex items-center justify-center gap-2"
+                                        onClick={() => { if(expert.onlineStatus !== 'busy') openIntake('VIDEO'); }}
+                                        className={`py-4 rounded-xl border border-white/5 transition-all active:scale-95 flex items-center justify-center gap-2 ${
+                                            expert.onlineStatus === 'busy'
+                                            ? "bg-amber-500/5 text-amber-500/50 border-amber-500/10 cursor-wait"
+                                            : "bg-[#161922] hover:bg-white/5 text-slate-400"
+                                        }`}
                                     >
                                         <Video size={16} />
                                         <span className="text-xs font-medium">video</span>
@@ -302,6 +344,13 @@ const ExpertDetail = () => {
                     </div>
                 </div>
             </div>
+
+            <StatusPopup 
+                isOpen={statusModal.open}
+                onClose={() => setStatusModal({ ...statusModal, open: false })}
+                expert={expert}
+                type={statusModal.type}
+            />
         </div>
     );
 };

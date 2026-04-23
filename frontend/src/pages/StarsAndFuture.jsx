@@ -16,6 +16,8 @@ import { useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "../context/ToastContext";
 import IntakeForm from "../components/IntakeForm";
+import StatusPopup from "../components/StatusPopup";
+import socket from "../lib/socket";
 
 const StarsAndFuture = () => {
   const navigate = useNavigate();
@@ -34,6 +36,7 @@ const StarsAndFuture = () => {
 
   const [filters, setFilters] = useState([{ id: "all", label: "All Sessions" }]);
   const [metaLoaded, setMetaLoaded] = useState(false);
+  const [statusModal, setStatusModal] = useState({ open: false, expert: null, type: 'busy' });
 
   const staticExperts = [
     {
@@ -79,45 +82,71 @@ const StarsAndFuture = () => {
 
   useEffect(() => {
     const loadMetadata = async () => {
-        try {
-            const res = await api.get("/experts/meta/categories");
-            const starCat = res.data.data.find(c => c.code === 'starandfuture');
-            if (starCat) {
-                const dynamicFilters = [
-                    { id: "all", label: "All Sessions" },
-                    ...starCat.skills.map(s => ({ id: s.name.toLowerCase(), label: s.name }))
-                ];
-                setFilters(dynamicFilters);
-            }
-        } catch (err) {
-            console.error("Meta load failed");
-        } finally {
-            setMetaLoaded(true);
+      try {
+        const res = await api.get("/experts/meta/categories");
+        const starCat = res.data.data.find(c => c.code === 'starandfuture');
+        if (starCat) {
+          const dynamicFilters = [
+            { id: "all", label: "All Sessions" },
+            ...starCat.skills.map(s => ({ id: s.name.toLowerCase(), label: s.name }))
+          ];
+          setFilters(dynamicFilters);
         }
+      } catch (err) {
+        console.error("Meta load failed");
+      } finally {
+        setMetaLoaded(true);
+      }
     };
 
     const loadData = async () => {
-        try {
-            setLoading(true);
-            const res = await api.get("/experts?category=starandfuture");
-            if (res.data.data.experts?.length > 0) {
-                setExperts(res.data.data.experts);
-            } else {
-                setExperts(staticExperts);
-            }
-        } catch (err) {
-            setExperts(staticExperts);
-        } finally {
-            setLoading(false);
+      try {
+        setLoading(true);
+        const res = await api.get("/experts?category=starandfuture");
+        if (res.data.data.experts?.length > 0) {
+          setExperts(res.data.data.experts);
+        } else {
+          setExperts(staticExperts);
         }
+      } catch (err) {
+        setExperts(staticExperts);
+      } finally {
+        setLoading(false);
+      }
     };
+
     loadMetadata();
     loadData();
+
+    // Listen for real-time status updates
+    const handleStatusUpdate = ({ expertId, status }) => {
+      setExperts(prev => prev.map(expert => 
+        expert.id === expertId ? { 
+          ...expert, 
+          onlineStatus: status,
+          isOnline: status !== 'offline'
+        } : expert
+      ));
+    };
+
+    socket.on('expert_status_update', handleStatusUpdate);
+
+    return () => {
+      socket.off('expert_status_update', handleStatusUpdate);
+    };
   }, []);
 
   const openIntake = (expert, type) => {
     if (!token) {
         setIsLoginModalOpen(true);
+        return;
+    }
+    if (expert.onlineStatus === 'busy') {
+        setStatusModal({ open: true, expert, type: 'busy' });
+        return;
+    }
+    if (!expert.isOnline) {
+        setStatusModal({ open: true, expert, type: 'offline' });
         return;
     }
     setSelectedExpert(expert);
@@ -226,8 +255,8 @@ const StarsAndFuture = () => {
                           className="w-full h-full object-cover grayscale-[0.3] group-hover:grayscale-0 transition-all duration-700 group-hover:scale-105"
                         />
                       </div>
-                      <div className={`absolute bottom-1 right-1 w-5 h-5 rounded-full border-2 border-[#161922] shadow-2xl ${expert.isOnline ? 'bg-emerald-500' : 'bg-slate-700'}`}>
-                        {expert.isOnline && <div className="w-full h-full rounded-full bg-white animate-pulse opacity-40" />}
+                      <div className={`absolute bottom-1 right-1 w-5 h-5 rounded-full border-2 border-[#161922] shadow-2xl ${expert.onlineStatus === 'busy' ? 'bg-amber-500' : expert.isOnline ? 'bg-emerald-500' : 'bg-slate-700'}`}>
+                        {(expert.onlineStatus === 'busy' || expert.isOnline) && <div className={`w-full h-full rounded-full bg-white ${expert.onlineStatus === 'busy' ? '' : 'animate-pulse'} opacity-40`} />}
                       </div>
                     </div>
 
@@ -277,26 +306,30 @@ const StarsAndFuture = () => {
                         
                         <div className="flex gap-2">
                           <button
-                            onClick={(e) => { e.stopPropagation(); openIntake(expert, 'CHAT'); }}
+                            onClick={(e) => { e.stopPropagation(); if(expert.onlineStatus !== 'busy') openIntake(expert, 'CHAT'); }}
                             className={`flex items-center gap-2 px-4 py-2 rounded-lg text-[11px] font-bold transition-all  ${
-                              expert.isOnline 
+                              expert.onlineStatus === 'busy' 
+                              ? "bg-amber-500/10 text-amber-500 border border-amber-500/20 cursor-wait"
+                              : expert.isOnline 
                               ? "bg-white text-black hover:bg-slate-200 shadow-lg" 
                               : "bg-white/5 text-slate-600 cursor-not-allowed border border-white/5"
                             }`}
                           >
                             <MessageSquare size={14} />
-                            <span>chat</span>
+                            <span>{expert.onlineStatus === 'busy' ? 'busy' : 'chat'}</span>
                           </button>
                           <button
-                            onClick={(e) => { e.stopPropagation(); openIntake(expert, 'CALL'); }}
+                            onClick={(e) => { e.stopPropagation(); if(expert.onlineStatus !== 'busy') openIntake(expert, 'CALL'); }}
                             className={`flex items-center gap-2 px-4 py-2 rounded-lg text-[11px] font-bold transition-all  ${
-                              expert.isOnline 
+                              expert.onlineStatus === 'busy' 
+                              ? "bg-amber-500/10 text-amber-500 border border-amber-500/20 cursor-wait"
+                              : expert.isOnline 
                               ? "bg-white/5 text-white border border-white/10 hover:bg-white/10" 
                               : "bg-white/5 text-slate-600 cursor-not-allowed border border-white/5"
                             }`}
                           >
                             <Phone size={14} />
-                            <span>call</span>
+                            <span>{expert.onlineStatus === 'busy' ? 'busy' : 'call'}</span>
                           </button>
                         </div>
                       </div>
@@ -307,6 +340,13 @@ const StarsAndFuture = () => {
             </div>
         )}
       </div>
+
+      <StatusPopup 
+        isOpen={statusModal.open}
+        onClose={() => setStatusModal({ ...statusModal, open: false })}
+        expert={statusModal.expert}
+        type={statusModal.type}
+      />
     </div>
   );
 };

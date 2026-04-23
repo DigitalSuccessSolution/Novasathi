@@ -50,9 +50,9 @@ const AdminContent = () => {
     });
 
     const categoryTabs = [
-        { id: "MESSAGE", label: "Daily Guidance", icon: Sparkles },
-        { id: "MEDIA", label: "Media Library", icon: ImageIcon },
-        { id: "BLOG", label: "Knowledge Hub", icon: FileText },
+         { id: "MESSAGE", label: "Daily Guidance", icon: Sparkles },
+        // { id: "MEDIA", label: "Media Library", icon: ImageIcon },
+        // { id: "BLOG", label: "Knowledge Hub", icon: FileText },
         { id: "HANDBOOK", label: "Expert Handbook", icon: Book }
     ];
 

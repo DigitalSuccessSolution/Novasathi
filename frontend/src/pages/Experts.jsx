@@ -5,6 +5,8 @@ import axios from "axios";
 import { useAuth } from "../context/AuthContext";
 import { useChat } from "../context/ChatContext";
 import { motion } from "framer-motion";
+import StatusPopup from "../components/StatusPopup";
+import socket from "../lib/socket";
 
 /**
  * Experts Sanctuary - Browsing all soul guides and ritual experts.
@@ -17,6 +19,7 @@ const ExpertsPortal = () => {
     const [loading, setLoading] = useState(true);
     const [filter, setFilter] = useState("All");
     const [searchQuery, setSearchQuery] = useState("");
+    const [statusModal, setStatusModal] = useState({ open: false, expert: null, type: 'busy' });
 
     const fetchExperts = async () => {
         try {
@@ -34,6 +37,23 @@ const ExpertsPortal = () => {
 
     useEffect(() => {
         fetchExperts();
+
+        // Listen for real-time status updates
+        const handleStatusUpdate = ({ expertId, status }) => {
+            setExperts(prev => prev.map(expert => 
+                expert.id === expertId ? { 
+                    ...expert, 
+                    onlineStatus: status,
+                    isOnline: status !== 'offline'
+                } : expert
+            ));
+        };
+
+        socket.on('expert_status_update', handleStatusUpdate);
+
+        return () => {
+            socket.off('expert_status_update', handleStatusUpdate);
+        };
     }, [api]);
 
     const categories = ["All", "Astrology", "Tarot", "Numerology", "Love", "Career"];
@@ -128,8 +148,8 @@ const ExpertsPortal = () => {
                                                alt={expert.displayName}
                                           />
                                      </div>
-                                     <div className={`absolute -bottom-1 -right-1 w-6 h-6 rounded-xl border-2 border-[#06070f] flex items-center justify-center p-0.5 shadow-xl ${expert.isOnline ? 'bg-emerald-500' : 'bg-gray-600'}`}>
-                                          <div className={`w-full h-full rounded-lg ${expert.isOnline ? 'bg-emerald-200 animate-pulse' : 'bg-gray-400'}`}></div>
+                                     <div className={`absolute -bottom-1 -right-1 w-6 h-6 rounded-xl border-2 border-[#06070f] flex items-center justify-center p-0.5 shadow-xl ${expert.onlineStatus === 'busy' ? 'bg-amber-500' : expert.isOnline ? 'bg-emerald-500' : 'bg-gray-600'}`}>
+                                          <div className={`w-full h-full rounded-lg ${expert.onlineStatus === 'busy' ? 'bg-amber-200' : expert.isOnline ? 'bg-emerald-200 animate-pulse' : 'bg-gray-400'}`}></div>
                                      </div>
                                 </div>
 
@@ -173,6 +193,14 @@ const ExpertsPortal = () => {
                             <div className="relative z-10 mt-6 pt-4 border-t border-white/5 grid grid-cols-3 gap-3">
                                 <button 
                                     onClick={() => {
+                                        if (expert.onlineStatus === 'busy') {
+                                            setStatusModal({ open: true, expert, type: 'busy' });
+                                            return;
+                                        }
+                                        if (!expert.isOnline) {
+                                            setStatusModal({ open: true, expert, type: 'offline' });
+                                            return;
+                                        }
                                         if (!user) return navigate('/login');
                                         startAndOpenChat(expert.id, false, expert, 'CHAT');
                                     }}
@@ -183,6 +211,14 @@ const ExpertsPortal = () => {
                                 </button>
                                 <button 
                                     onClick={() => {
+                                        if (expert.onlineStatus === 'busy') {
+                                            setStatusModal({ open: true, expert, type: 'busy' });
+                                            return;
+                                        }
+                                        if (!expert.isOnline) {
+                                            setStatusModal({ open: true, expert, type: 'offline' });
+                                            return;
+                                        }
                                         if (!user) return navigate('/login');
                                         startAndOpenChat(expert.id, false, expert, 'CALL');
                                     }}
@@ -193,6 +229,14 @@ const ExpertsPortal = () => {
                                 </button>
                                 <button 
                                     onClick={() => {
+                                        if (expert.onlineStatus === 'busy') {
+                                            setStatusModal({ open: true, expert, type: 'busy' });
+                                            return;
+                                        }
+                                        if (!expert.isOnline) {
+                                            setStatusModal({ open: true, expert, type: 'offline' });
+                                            return;
+                                        }
                                         if (!user) return navigate('/login');
                                         startAndOpenChat(expert.id, false, expert, 'VIDEO');
                                     }}
@@ -212,6 +256,13 @@ const ExpertsPortal = () => {
                     )}
                 </div>
             </div>
+
+            <StatusPopup 
+                isOpen={statusModal.open}
+                onClose={() => setStatusModal({ ...statusModal, open: false })}
+                expert={statusModal.expert}
+                type={statusModal.type}
+            />
         </div>
     );
 };

@@ -2,6 +2,7 @@ const prisma = require('../../config/prisma');
 const catchAsync = require('../../utils/catchAsync');
 const AppError = require('../../utils/AppError');
 const ApiResponse = require('../../utils/ApiResponse');
+const ChatService = require('./chat.service');
 
 /**
  * Submit pre-chat intake data (SRS §3.1)
@@ -152,6 +153,18 @@ exports.startSession = catchAsync(async (req, res, next) => {
     return next(new AppError(`Low balance! You need at least ₹${requiredBalance} for a paid ritual.`, 402));
   }
 
+  // Check if expert is already busy
+  const busySession = await prisma.chatSession.findFirst({
+    where: {
+      expertId: finalExpertId,
+      status: { in: ['ACTIVE', 'WAITING'] }
+    }
+  });
+
+  if (busySession) {
+    return next(new AppError("Expert is currently busy with another ritual. Please try again in a few minutes.", 409));
+  }
+
   const session = await prisma.chatSession.create({
     data: {
       userId: req.user.id,
@@ -169,11 +182,22 @@ exports.startSession = catchAsync(async (req, res, next) => {
     },
   });
 
-  // Notify Expert (Unified Ritual Panel)
+  // Mark expert as busy immediately (Ringing phase)
+  await prisma.expert.update({
+    where: { id: finalExpertId },
+    data: { onlineStatus: 'busy', isOnline: true }
+  });
+
+  // Notify Expert (Unified Ritual Panel) and Broadcast Status
   try {
-    const { getIO } = require('../../socket');
+    const { getIO, broadcastExpertStatus } = require('../../socket');
     const io = getIO();
     
+    // Broadcast status to marketplace
+    if (broadcastExpertStatus) {
+        broadcastExpertStatus(finalExpertId, 'busy');
+    }
+
     // Trigger high-priority expert ringing panel for ALL types
     io.to(`portal:${finalExpertId}`).emit('incoming_call', {
       sessionId: session.id,
@@ -230,6 +254,49 @@ exports.getSession = catchAsync(async (req, res, next) => {
 });
 
 /**
+ * Expert: Accept a pending ritual request (Chat/Audio/Video)
+ */
+exports.acceptSession = catchAsync(async (req, res, next) => {
+  const { sessionId } = req.params;
+  const session = await prisma.chatSession.findUnique({ where: { id: sessionId } });
+  
+  if (!session) return next(new AppError('Session not found', 404));
+  
+  // Update status to ACTIVE
+  // Update status to ACTIVE
+  const updatedSession = await prisma.chatSession.update({
+    where: { id: sessionId },
+    data: { status: 'ACTIVE', startedAt: new Date() }
+  });
+
+  // Mark expert as busy
+  await prisma.expert.update({
+    where: { id: session.expertId },
+    data: { onlineStatus: 'busy' }
+  });
+
+  // Notify Seeker via Socket that Expert has accepted
+  try {
+    const { getIO } = require('../../socket');
+    const io = getIO();
+    io.to(session.userId).emit('call_response', { sessionId, accepted: true });
+  } catch (err) {
+    console.error("❌ [SOCKET_NOTIFY_ERROR]", err.message);
+  }
+
+  // Fetch full session with relations for consistent frontend metadata
+  const sessionWithDetails = await prisma.chatSession.findUnique({
+    where: { id: sessionId },
+    include: {
+      user: { select: { name: true, avatar: true } },
+      expert: { include: { user: { select: { name: true, avatar: true } } } }
+    }
+  });
+
+  res.status(200).json(new ApiResponse(200, sessionWithDetails, 'Ritual accepted successfully.'));
+});
+
+/**
  * End a session (called by either party or by auto-timer)
  * NOTE: The billing heartbeat handles per-minute deductions during the session.
  * This endpoint only handles the FINAL partial-minute settlement.
@@ -237,107 +304,45 @@ exports.getSession = catchAsync(async (req, res, next) => {
 exports.endSession = catchAsync(async (req, res, next) => {
   const { sessionId } = req.params;
 
-  const session = await prisma.chatSession.findUnique({ 
-    where: { id: sessionId },
-    include: { expert: true }
-  });
-  if (!session) return next(new AppError('Session not found', 404));
-  if (session.status === 'COMPLETED' || session.status === 'TERMINATED') {
-    return res.status(200).json(new ApiResponse(200, session, 'Session already ended'));
-  }
+  const updatedSession = await ChatService.endSession(sessionId);
+  if (!updatedSession) return next(new AppError('Session not found', 404));
 
-  const endedAt = new Date();
-  const startedAt = session.startedAt || session.createdAt;
-  const durationMs = endedAt - new Date(startedAt);
-  const totalMinutes = Math.ceil(durationMs / 60000);
-  const totalAmount = session.isFreeSession ? 0 : totalMinutes * (session.pricePerMinute || 10);
+  const totalMinutes = updatedSession.totalMinutes;
 
-  // Calculate only the remaining amount not yet billed by heartbeat
-  const alreadyBilled = session.totalAmount || 0;
-  const remainingToBill = Math.max(0, totalAmount - alreadyBilled);
-
-  // Update session — use totalMinutes (not "duration", which doesn't exist in schema)
-  const updatedSession = await prisma.chatSession.update({
-    where: { id: sessionId },
-    data: {
-      status: 'COMPLETED',
-      endedAt,
-      totalMinutes,
-      totalAmount,
-    },
-  });
-
-  // Deduct remaining from wallet if paid session
-  if (!session.isFreeSession && remainingToBill > 0) {
-    const wallet = await prisma.wallet.findUnique({ where: { userId: session.userId } });
-    if (wallet) {
-      await prisma.$transaction([
-        prisma.wallet.update({
-          where: { id: wallet.id },
-          data: {
-            balance: { decrement: remainingToBill },
-            totalSpent: { increment: remainingToBill },
-          },
-        }),
-        prisma.walletTransaction.create({
-          data: {
-            walletId: wallet.id,
-            amount: remainingToBill,
-            type: 'DEDUCTION',
-            status: 'COMPLETED',
-            description: `Final settlement: ${totalMinutes}m ${session.type} with ${session.expert?.displayName || 'Expert'}`,
-            chatSessionId: sessionId,
-          },
-        }),
-      ]);
-    }
-  }
-
-  // Only increment totalSessions (minutes & earnings already handled by heartbeat)
-  if (session.expertId) {
-    const alreadyBilledMinutes = session.totalMinutes || 0;
-    const remainingMinutes = Math.max(0, totalMinutes - alreadyBilledMinutes);
-
-    await prisma.expert.update({
-      where: { id: session.expertId },
-      data: {
-        totalSessions: { increment: 1 },
-        totalMinutes: { increment: remainingMinutes },
-        totalEarnings: { increment: session.isFreeSession ? 0 : remainingToBill },
-      },
-    });
-  }
-
-  // Update free minutes used (SRS §3.4)
-  if (session.isFreeSession) {
+  // Update free minutes used tracking (SRS §3.4)
+  if (updatedSession.isFreeSession) {
     await prisma.user.update({
-      where: { id: session.userId },
+      where: { id: updatedSession.userId },
       data: { freeMinutesUsed: { increment: totalMinutes } },
     });
 
     // If Early Bird, update the specific allocation record for the day
-    const user = await prisma.user.findUnique({ where: { id: session.userId } });
+    const user = await prisma.user.findUnique({ where: { id: updatedSession.userId } });
     if (user?.isEarlyBird) {
       const today = new Date();
       today.setUTCHours(0, 0, 0, 0);
       
-      const sessionType = session.type === 'CHAT' ? 'chatMinutesUsed' : 'callMinutesUsed';
+      const sessionType = updatedSession.type === 'CHAT' ? 'chatMinutesUsed' : 'callMinutesUsed';
       
       await prisma.freeAllocation.updateMany({
         where: { userId: user.id, allocDate: today },
         data: { [sessionType]: { increment: totalMinutes } }
       });
     }
+  }
 
-    if (session.counselorId) {
-      await prisma.counselor.update({
-        where: { id: session.counselorId },
-        data: {
-          totalSessions: { increment: 1 },
-          totalMinutes: { increment: totalMinutes },
-        },
-      });
-    }
+  // Notify both parties via socket
+  try {
+    const { getIO } = require('../../socket/index');
+    const io = getIO();
+    io.to(sessionId).emit('session_ended', { 
+      sessionId, 
+      status: updatedSession.status,
+      endedAt: updatedSession.endedAt,
+      totalAmount: updatedSession.totalAmount
+    });
+  } catch (err) {
+    console.error("🌌 [SOCKET_BROADCAST_ERROR]", err.message);
   }
 
   res.status(200).json(new ApiResponse(200, updatedSession, 'Session ended'));

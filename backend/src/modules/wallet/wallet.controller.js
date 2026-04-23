@@ -114,32 +114,38 @@ exports.verifyPayment = catchAsync(async (req, res, next) => {
     return res.status(200).json(new ApiResponse(200, transaction, 'Already processed'));
   }
 
-  // Update transaction
-  await prisma.walletTransaction.update({
-    where: { id: transaction.id },
-    data: {
-      status: 'COMPLETED',
-      razorpayPaymentId,
-      razorpaySignature,
-    },
-  });
-
-  // Credit wallet
-  await prisma.wallet.update({
-    where: { id: transaction.walletId },
-    data: {
-      balance: { increment: transaction.amount },
-      totalRecharged: { increment: transaction.amount },
-    },
-  });
-
-  // ─── SRS §5 — History Unlocking ─────────────────────────
-  if (transaction.chatSessionId) {
-    await prisma.chatSession.update({
-      where: { id: transaction.chatSessionId },
-      data: { isUnlocked: true, unlockedAt: new Date() }
+  // ─── ATOMIC TRANSACTION: Update status and credit balance ─────────
+  await prisma.$transaction(async (tx) => {
+    // 1. Mark transaction as completed
+    await tx.walletTransaction.update({
+      where: { id: transaction.id },
+      data: {
+        status: 'COMPLETED',
+        razorpayPaymentId,
+        razorpaySignature,
+      },
     });
-    
+
+    // 2. Credit wallet
+    await tx.wallet.update({
+      where: { id: transaction.walletId },
+      data: {
+        balance: { increment: transaction.amount },
+        totalRecharged: { increment: transaction.amount },
+      },
+    });
+
+    // 3. Unlock history if applicable
+    if (transaction.chatSessionId) {
+      await tx.chatSession.update({
+        where: { id: transaction.chatSessionId },
+        data: { isUnlocked: true, unlockedAt: new Date() }
+      });
+    }
+  });
+
+  // ─── SRS §5 — History Unlocking Notification ─────────────
+  if (transaction.chatSessionId) {
     // Notify user about unlocked history
     await NotificationEngine.send({
       userId: transaction.wallet.userId,
@@ -167,31 +173,33 @@ exports.verifyPayment = catchAsync(async (req, res, next) => {
  * Deduct from wallet (internal use — called by chat billing)
  */
 exports.deductBalance = async (userId, amount, description, chatSessionId) => {
-  const wallet = await prisma.wallet.findUnique({ where: { userId } });
-  if (!wallet || wallet.balance < amount) {
-    throw new AppError('Insufficient wallet balance', 402);
-  }
+  return await prisma.$transaction(async (tx) => {
+    const wallet = await tx.wallet.findUnique({ where: { userId } });
+    if (!wallet || wallet.balance < amount) {
+      throw new AppError('Insufficient wallet balance', 402);
+    }
 
-  await prisma.wallet.update({
-    where: { id: wallet.id },
-    data: {
-      balance: { decrement: amount },
-      totalSpent: { increment: amount },
-    },
+    await tx.wallet.update({
+      where: { id: wallet.id },
+      data: {
+        balance: { decrement: amount },
+        totalSpent: { increment: amount },
+      },
+    });
+
+    await tx.walletTransaction.create({
+      data: {
+        walletId: wallet.id,
+        amount,
+        type: 'DEDUCTION',
+        status: 'COMPLETED',
+        description,
+        chatSessionId,
+      },
+    });
+
+    return wallet.balance - amount;
   });
-
-  await prisma.walletTransaction.create({
-    data: {
-      walletId: wallet.id,
-      amount,
-      type: 'DEDUCTION',
-      status: 'COMPLETED',
-      description,
-      chatSessionId,
-    },
-  });
-
-  return wallet.balance - amount;
 };
 
 /**
@@ -235,8 +243,10 @@ exports.getTransactions = catchAsync(async (req, res) => {
  * Test Recharge (Dev Use Only) - Add ₹500 Test Jewels
  */
 exports.rechargeTestBalance = catchAsync(async (req, res, next) => {
-  // Only allow in development or for specific users if needed
-  // if (process.env.NODE_ENV !== 'development') return next(new AppError('Forbidden in production', 403));
+  // Only allow in development
+  if (process.env.NODE_ENV !== 'development') {
+    return next(new AppError('This endpoint is only available in development mode.', 403));
+  }
 
   let wallet = await prisma.wallet.findUnique({ where: { userId: req.user.id } });
   if (!wallet) {

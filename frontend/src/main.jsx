@@ -8,8 +8,12 @@ import { CallProvider } from './context/CallContext'
 import { ChatProvider } from './context/ChatContext'
 import { NotificationProvider } from './context/NotificationContext'
 import { BrowserRouter } from 'react-router-dom'
+import { setupInterceptors } from './lib/api'
 import './index.css'
 import App from './App.jsx'
+
+// Initialize Axios Interceptors with Redux store
+setupInterceptors(store);
 
 createRoot(document.getElementById('root')).render(
   <StrictMode>

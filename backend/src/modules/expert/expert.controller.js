@@ -2,6 +2,7 @@ const prisma = require('../../config/prisma');
 const catchAsync = require('../../utils/catchAsync');
 const AppError = require('../../utils/AppError');
 const ApiResponse = require('../../utils/ApiResponse');
+const ExpertService = require('./expert.service');
 
 /**
  * List all approved experts
@@ -168,9 +169,16 @@ exports.toggleOnline = catchAsync(async (req, res, next) => {
   const updatedExpert = await prisma.expert.update({
     where: { userId: req.user.id },
     data: { 
-        isOnline: !expert.isOnline
+        isOnline: !expert.isOnline,
+        onlineStatus: !expert.isOnline ? 'available' : 'offline'
     }
   });
+
+  // Broadcast status update for real-time marketplace sync
+  const { broadcastExpertStatus } = require('../../socket/index');
+  if (broadcastExpertStatus) {
+    broadcastExpertStatus(updatedExpert.id, updatedExpert.onlineStatus);
+  }
 
   res.status(200).json(new ApiResponse(200, updatedExpert, `Status: ${updatedExpert.isOnline ? 'ONLINE' : 'OFFLINE'}`));
 });
@@ -261,20 +269,12 @@ exports.getOverview = catchAsync(async (req, res, next) => {
 
     if (!expert) return next(new AppError('Expert profile not found', 404));
 
-    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-    const todayStats = await prisma.chatSession.aggregate({
-        where: { expertId: expert.id, status: { in: ['COMPLETED', 'TERMINATED'] }, endedAt: { gte: todayStart } },
-        _sum: { totalAmount: true, totalMinutes: true },
-        _count: true,
-    });
+    const todayStart = ExpertService.getStartOfDay();
+    const todayStats = await ExpertService.getStats(expert.id, todayStart);
 
     res.status(200).json(new ApiResponse(200, {
         expert,
-        today: {
-            earnings: todayStats._sum.totalAmount || 0,
-            minutes: todayStats._sum.totalMinutes || 0,
-            count: todayStats._count || 0
-        },
+        today: todayStats,
         commissionRate: expert.commissionPercent || 30
     }, 'Overview data retrieved'));
 });
@@ -300,15 +300,12 @@ exports.getEarnings = catchAsync(async (req, res, next) => {
 
     if (!expert) return next(new AppError('Expert profile not found', 404));
 
-    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-    const todayEarnings = await prisma.chatSession.aggregate({
-        where: { expertId: expert.id, status: { in: ['COMPLETED', 'TERMINATED'] }, endedAt: { gte: todayStart } },
-        _sum: { totalAmount: true }
-    });
+    const todayStart = ExpertService.getStartOfDay();
+    const todayEarnings = await ExpertService.getStats(expert.id, todayStart);
 
     res.status(200).json(new ApiResponse(200, {
         expert,
-        today: { earnings: todayEarnings._sum.totalAmount || 0 },
+        today: todayEarnings,
         commissionRate: expert.commissionPercent || 30
     }, 'Earnings data retrieved'));
 });
@@ -357,6 +354,18 @@ exports.submitReview = catchAsync(async (req, res, next) => {
     const { expertId } = req.params;
     const { rating, comment } = req.body;
 
+    if (!rating || parseFloat(rating) < 1 || parseFloat(rating) > 5) {
+        return next(new AppError('Rating must be between 1 and 5.', 400));
+    }
+
+    // Prevent duplicate reviews from the same user
+    const existingReview = await prisma.review.findFirst({
+        where: { expertId, userId: req.user.id }
+    });
+    if (existingReview) {
+        return next(new AppError('You have already reviewed this expert.', 400));
+    }
+
     const review = await prisma.review.create({
         data: {
             expertId,
@@ -374,7 +383,24 @@ exports.submitReview = catchAsync(async (req, res, next) => {
  */
 exports.requestPayout = catchAsync(async (req, res, next) => {
     const { amount } = req.body;
+
+    if (!amount || parseFloat(amount) <= 0) {
+        return next(new AppError('Invalid payout amount.', 400));
+    }
+
     const expert = await prisma.expert.findUnique({ where: { userId: req.user.id } });
+    if (!expert) return next(new AppError('Expert profile not found.', 404));
+
+    // Validate against available earnings (totalEarnings - already paid out)
+    const paidOut = await prisma.payout.aggregate({
+        where: { expertId: expert.id, status: 'COMPLETED' },
+        _sum: { amount: true }
+    });
+    const availableBalance = (expert.totalEarnings || 0) - (paidOut._sum.amount || 0);
+
+    if (parseFloat(amount) > availableBalance) {
+        return next(new AppError(`Insufficient balance. Available: ₹${availableBalance.toFixed(2)}`, 400));
+    }
 
     const payout = await prisma.payout.create({
         data: {

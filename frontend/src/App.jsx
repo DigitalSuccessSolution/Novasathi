@@ -38,11 +38,71 @@ import ExpertTerms from "./pages/expert/ExpertTerms";
 import ExpertLogin from "./components/ExpertLogin";
 import ExpertSignup from "./components/ExpertSignup";
 
+import ExpertLayout from "./components/ExpertLayout";
 import UserBottomNav from "./components/UserBottomNav";
 import LoginSidebar from "./components/LoginSidebar";
 import Experts from "./pages/Experts";
 import Navbar from "./components/Navbar";
 import Footer from "./components/Footer";
+import { WifiOff } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
+
+// ─── NETWORK STATUS INDICATOR ───
+const NetworkStatus = () => {
+  const [isOffline, setIsOffline] = React.useState(!navigator.onLine);
+  const [showOnline, setShowOnline] = React.useState(false);
+
+  React.useEffect(() => {
+    const handleOffline = () => {
+      setIsOffline(true);
+      setShowOnline(false);
+    };
+    const handleOnline = () => {
+      setIsOffline(false);
+      setShowOnline(true);
+      setTimeout(() => setShowOnline(false), 3000);
+    };
+
+    window.addEventListener('offline', handleOffline);
+    window.addEventListener('online', handleOnline);
+
+    return () => {
+      window.removeEventListener('offline', handleOffline);
+      window.removeEventListener('online', handleOnline);
+    };
+  }, []);
+
+  return (
+    <AnimatePresence>
+      {isOffline && (
+        <motion.div
+          initial={{ y: -50, opacity: 0 }}
+          animate={{ y: 0, opacity: 1 }}
+          exit={{ y: -50, opacity: 0 }}
+          className="fixed top-0 left-0 right-0 z-[9999] flex justify-center pointer-events-none mt-4"
+        >
+          <div className="bg-red-500/90 backdrop-blur-md text-white px-6 py-2.5 rounded-full shadow-2xl border border-red-400/50 flex items-center gap-3">
+            <WifiOff size={16} className="animate-pulse text-white" />
+            <span className="text-[12px] font-bold tracking-widest uppercase">Connection Lost • Reconnecting</span>
+          </div>
+        </motion.div>
+      )}
+      {showOnline && (
+        <motion.div
+          initial={{ y: -50, opacity: 0 }}
+          animate={{ y: 0, opacity: 1 }}
+          exit={{ y: -50, opacity: 0 }}
+          className="fixed top-0 left-0 right-0 z-[9999] flex justify-center pointer-events-none mt-4"
+        >
+          <div className="bg-emerald-500/90 backdrop-blur-md text-white px-6 py-2.5 rounded-full shadow-2xl border border-emerald-400/50 flex items-center gap-3">
+            <div className="w-2 h-2 rounded-full bg-white animate-ping" />
+            <span className="text-[12px] font-bold tracking-widest uppercase">Back Online</span>
+          </div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+};
 
 // ─── SCROLL TO TOP ON NAVIGATE ───
 const ScrollToTop = () => {
@@ -128,15 +188,13 @@ const AppContent = () => {
                            pathname === "/transactions" ||
                            pathname === "/experts";
 
-  const isChatPath = pathname.startsWith("/chat/") || pathname.startsWith("/admin/messages");
-
+  const isAdminPath = pathname.startsWith("/admin");
+  const isExpertPath = pathname.startsWith("/expert-panel");
+  const isChatPath = pathname.startsWith("/chat/") || isExpertPath || pathname.startsWith("/admin/messages");
   const isHideNav = pathname === "/expert-login" || 
                      pathname === "/expert-signup" ||
                      pathname === "/admin-login" ||
                      isChatPath;
-
-  const isAdminPath = pathname.startsWith("/admin");
-  const isExpertPath = pathname.startsWith("/expert-panel");
   const hideFooter = isHideNav || isUserDashboard || isAdminPath || isExpertPath;
 
   return (
@@ -183,6 +241,7 @@ const AppContent = () => {
         <Route path="/expert-panel/history" element={<ProtectedRoute allowedRoles={['EXPERT']}><ExpertHistory /></ProtectedRoute>} />
         <Route path="/expert-panel/profile" element={<ProtectedRoute allowedRoles={['EXPERT']}><ExpertProfile /></ProtectedRoute>} />
         <Route path="/expert-panel/sessions" element={<ProtectedRoute allowedRoles={['EXPERT']}><ExpertSessions /></ProtectedRoute>} />
+        <Route path="/expert-panel/chat/:id" element={<ProtectedRoute allowedRoles={['EXPERT']}><ExpertLayout noPadding={true}><ChatScreen /></ExpertLayout></ProtectedRoute>} />
         <Route path="/expert-panel/settings" element={<ProtectedRoute allowedRoles={['EXPERT']}><ExpertSettings /></ProtectedRoute>} />
         <Route path="/expert-panel/lounge" element={<ProtectedRoute allowedRoles={['EXPERT', 'ADMIN']}><ExpertLounge /></ProtectedRoute>} />
         <Route path="/expert-panel/handbook" element={<ProtectedRoute allowedRoles={['EXPERT']}><ExpertHandbook /></ProtectedRoute>} />
@@ -202,11 +261,16 @@ const AppContent = () => {
 };
 
 const App = () => {
+  useEffect(() => {
+    console.log("🚀 [APP] Main App mounted/re-rendered");
+  }, []);
+
   return (
     <>
+      <CallManager />
+      <NetworkStatus />
       <ScrollToTop />
       <AppContent />
-      <CallManager />
     </>
   );
 };

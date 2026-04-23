@@ -8,8 +8,6 @@ router.use(protect);
 
 router.get('/me', userController.getMe);
 router.patch('/me', upload.single('avatar'), userController.updateProfile);
-router.get('/profile', userController.getMe);
-router.patch('/profile', upload.single('avatar'), userController.updateProfile);
 router.patch('/mood', userController.setMood);
 router.get('/history', userController.getChatHistory);
 router.get('/favorites', userController.getFavorites);

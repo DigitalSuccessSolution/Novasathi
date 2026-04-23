@@ -3,6 +3,7 @@ const jwt = require("jsonwebtoken");
 const prisma = require("../config/prisma");
 const redis = require("../config/redis");
 const { filterMessage, logRedAlert } = require("../middleware/chatFilter");
+const ChatService = require("../modules/chat/chat.service");
 
 let io;
 
@@ -10,6 +11,11 @@ let io;
  * NovaSathi Socket Gateway — Production-Grade Real-Time Engine
  * Handles: Messaging, WebRTC Signaling, Per-Minute Billing, Session Management
  */
+const broadcastExpertStatus = async (expertId, status) => {
+  if (!io) return;
+  io.emit('expert_status_update', { expertId, status });
+  console.log(`📡 [STATUS_BROADCAST] Expert ${expertId} is now ${status}`);
+};
 function initializeSocket(server) {
   io = new Server(server, {
     cors: {
@@ -37,34 +43,74 @@ function initializeSocket(server) {
   io.use(async (socket, next) => {
     try {
       const token = socket.handshake.auth?.token;
-      if (!token) return next(new Error("Authentication required"));
+      if (!token) {
+        // Allow anonymous connection for marketplace updates
+        socket.user = { role: 'GUEST' };
+        return next();
+      }
 
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
       const user = await prisma.user.findUnique({ 
         where: { id: decoded.id },
-        include: { expert: { select: { id: true } } }
+        include: { expert: { select: { id: true, displayName: true, profileImage: true } } }
       });
       if (!user) return next(new Error("User not found"));
 
       socket.user = user;
       next();
     } catch (err) {
-      next(new Error("Forbidden: Token expired or invalid"));
+      // Fallback to GUEST on invalid token instead of closing connection
+      socket.user = { role: 'GUEST' };
+      next();
     }
   });
 
   // ─── CONNECTION HANDLER ───────────────────────────────────────
   io.on("connection", async (socket) => {
-    console.log(`🔌 [SOCKET] Connected: ${socket.user.id} (${socket.user.role})`);
+    console.log(`🔌 [SOCKET] Connected: ${socket.user.id || 'Guest'} (${socket.user.role})`);
     
-    // Track socket for presence
-    await redis.setex(`socket:${socket.user.id}`, 3600, socket.id);
+    // Track socket for presence (Only for logged in users)
+    if (socket.user.id) {
+      await redis.setex(`socket:${socket.user.id}`, 3600, socket.id);
+    }
+    
+    // Expert Presence logic
+    if (socket.user.role === 'EXPERT' && socket.user.expert?.id) {
+      const expertId = socket.user.expert.id;
+      
+      // Check if expert has any active or waiting sessions
+      const activeSession = await prisma.chatSession.findFirst({
+        where: {
+          expertId,
+          status: { in: ['ACTIVE', 'WAITING'] }
+        }
+      });
+
+      if (activeSession) {
+        // If they have an active session, ensure they are marked as busy
+        await prisma.expert.update({
+          where: { id: expertId },
+          data: { onlineStatus: 'busy', isOnline: true }
+        });
+        broadcastExpertStatus(expertId, 'busy');
+      } else {
+        // Otherwise, mark as available
+        await prisma.expert.update({
+          where: { id: expertId },
+          data: { onlineStatus: 'available', isOnline: true }
+        });
+        broadcastExpertStatus(expertId, 'available');
+      }
+    }
     
     // Join dedicated notification room for targeted alerts
-    socket.join(`notification:${socket.user.id}`);
+    if (socket.user.id) {
+      socket.join(`notification:${socket.user.id}`);
+    }
 
     // ─── ROOM MANAGEMENT ──────────────────────────────────────
     socket.on('join_chat', async ({ sessionId }) => {
+      if (socket.user.role === 'GUEST') return socket.emit('error', { message: 'Login required' });
       const session = await prisma.chatSession.findUnique({ 
         where: { id: sessionId },
         include: { user: true, expert: true, counselor: true }
@@ -86,6 +132,13 @@ function initializeSocket(server) {
           where: { id: sessionId },
           data: { status: 'ACTIVE', startedAt: new Date() },
         });
+
+        // Mark expert as busy
+        await prisma.expert.update({
+          where: { id: session.expertId },
+          data: { onlineStatus: 'busy', isOnline: true }
+        });
+        broadcastExpertStatus(session.expertId, 'busy');
       }
       
       if (roomSize >= 2) {
@@ -115,6 +168,10 @@ function initializeSocket(server) {
       }
     });
 
+    socket.on('leave_chat', async ({ sessionId }) => {
+      await socket.leave(sessionId);
+    });
+
     socket.on('join_portal', (portalId) => {
       socket.join(`portal:${portalId}`);
     });
@@ -127,70 +184,75 @@ function initializeSocket(server) {
 
     // ─── MESSAGING (SRS §6.1 — Anti-Leakage Filter Applied) ──
     socket.on('send_message', async (data) => {
-      const { sessionId, content, messageType = 'TEXT', tempId, overrideSenderId } = data;
-      
-      const session = await prisma.chatSession.findUnique({ where: { id: sessionId } });
-      if (!session || (session.status !== 'ACTIVE' && session.status !== 'WAITING')) {
-        return socket.emit('error', { message: 'Session not available for messaging' });
-      }
-
-      // Admin "behalf-of" spoofing — fully audited
-      let finalSenderId = socket.user.id;
-      let adminInterventionId = null;
-
-      if (overrideSenderId && socket.user.role === 'ADMIN') {
-        finalSenderId = overrideSenderId;
-        adminInterventionId = socket.user.id;
-      }
-
-      // ─── SRS §6.1 — Anti-Leakage Filter ─────────────────────
-      let finalContent = content;
-      let isFiltered = false;
-
-      if (messageType === 'TEXT' && socket.user.role !== 'ADMIN') {
-        const filterResult = filterMessage(content);
-        finalContent = filterResult.sanitized;
-        isFiltered = filterResult.isFiltered;
-
-        if (isFiltered) {
-          // Log Red Alert to admin (SRS §9.6)
-          logRedAlert({
-            userId: socket.user.id,
-            sessionId,
-            originalContent: content,
-            matchedPatterns: filterResult.matchedPatterns,
-          });
+      try {
+        const { sessionId, content, messageType = 'TEXT', tempId, overrideSenderId } = data;
+        
+        const session = await prisma.chatSession.findUnique({ where: { id: sessionId } });
+        if (!session || (session.status !== 'ACTIVE' && session.status !== 'WAITING')) {
+          return socket.emit('error', { message: 'Session not available for messaging' });
         }
-      }
 
-      const message = await prisma.chatMessage.create({
-        data: {
+        // Admin "behalf-of" spoofing — fully audited
+        let finalSenderId = socket.user.id;
+        let adminInterventionId = null;
+
+        if (overrideSenderId && socket.user.role === 'ADMIN') {
+          finalSenderId = overrideSenderId;
+          adminInterventionId = socket.user.id;
+        }
+
+        // ─── SRS §6.1 — Anti-Leakage Filter ─────────────────────
+        let finalContent = content;
+        let isFiltered = false;
+
+        if (messageType === 'TEXT' && socket.user.role !== 'ADMIN') {
+          const filterResult = filterMessage(content);
+          finalContent = filterResult.sanitized;
+          isFiltered = filterResult.isFiltered;
+
+          if (isFiltered) {
+            // Log Red Alert to admin (SRS §9.6)
+            logRedAlert({
+              userId: socket.user.id,
+              sessionId,
+              originalContent: content,
+              matchedPatterns: filterResult.matchedPatterns,
+            });
+          }
+        }
+
+        const message = await prisma.chatMessage.create({
+          data: {
+            sessionId,
+            senderId: finalSenderId,
+            content: finalContent,
+            messageType,
+            adminInterventionId,
+            isFiltered,
+          },
+          include: { sender: { select: { name: true, avatar: true, role: true } } }
+        });
+
+        const broadcastData = {
+          id: message.id,
           sessionId,
           senderId: finalSenderId,
           content: finalContent,
           messageType,
+          tempId,
+          createdAt: message.createdAt,
           adminInterventionId,
           isFiltered,
-        },
-        include: { sender: { select: { name: true, avatar: true, role: true } } }
-      });
+          sender: (session.isAnonymous && message.sender.role === 'USER') 
+                  ? { name: 'Anonymous Soul', avatar: null, role: 'USER' }
+                  : message.sender
+        };
 
-      const broadcastData = {
-        id: message.id,
-        sessionId,
-        senderId: finalSenderId,
-        content: finalContent,
-        messageType,
-        tempId,
-        createdAt: message.createdAt,
-        adminInterventionId,
-        isFiltered,
-        sender: (session.isAnonymous && message.sender.role === 'USER') 
-                ? { name: 'Anonymous Soul', avatar: null, role: 'USER' }
-                : message.sender
-      };
-
-      io.to(sessionId).emit('new_message', broadcastData);
+        io.to(sessionId).emit('new_message', broadcastData);
+      } catch (err) {
+        console.error("🔥 [SEND_MESSAGE_ERROR]:", err);
+        socket.emit('error', { message: 'Failed to send message. Please try again.' });
+      }
     });
 
     // ─── WEBRTC CALLING ───────────────────────────────────────
@@ -209,11 +271,11 @@ function initializeSocket(server) {
 
         const callerName = (session.isAnonymous && socket.user.role === 'USER')
             ? 'Anonymous Soul'
-            : (socket.user.name || 'Unknown');
+            : (socket.user.expert?.displayName || socket.user.name || 'Unknown');
 
         const callerAvatar = (session.isAnonymous && socket.user.role === 'USER')
             ? null
-            : socket.user.avatar;
+            : (socket.user.expert?.profileImage || socket.user.avatar);
 
         const incomingData = { 
           sessionId, 
@@ -233,7 +295,40 @@ function initializeSocket(server) {
       }
     });
 
-    socket.on('call_response', ({ sessionId, accepted, signal }) => {
+    socket.on('call_response', async ({ sessionId, accepted, signal }) => {
+      const session = await prisma.chatSession.findUnique({ where: { id: sessionId } });
+      
+      if (accepted) {
+        console.log(`✅ [CALL_ACCEPT] Session ${sessionId} accepted. Marking ACTIVE and BUSY.`);
+        await prisma.chatSession.update({
+          where: { id: sessionId },
+          data: { status: 'ACTIVE', startedAt: new Date() }
+        });
+
+        if (session && session.expertId) {
+          await prisma.expert.update({
+            where: { id: session.expertId },
+            data: { onlineStatus: 'busy', isOnline: true }
+          });
+          broadcastExpertStatus(session.expertId, 'busy');
+        }
+      } else {
+        // If rejected, mark session as terminated and RELEASE EXPERT
+        console.log(`🚫 [CALL_REJECT] Session ${sessionId} rejected. Releasing expert.`);
+        await prisma.chatSession.update({
+          where: { id: sessionId },
+          data: { status: 'TERMINATED', endedAt: new Date() }
+        });
+
+        if (session && session.expertId) {
+          await prisma.expert.update({
+            where: { id: session.expertId },
+            data: { onlineStatus: 'available', isOnline: true }
+          });
+          broadcastExpertStatus(session.expertId, 'available');
+        }
+      }
+
       socket.to(sessionId).emit('call_answered', { 
         sessionId, accepted, signal, responderId: socket.user.id 
       });
@@ -243,8 +338,32 @@ function initializeSocket(server) {
       socket.to(sessionId).emit('webrtc_signal', { signal, from: socket.user.id });
     });
 
-    socket.on('call_end', ({ sessionId }) => {
-      io.to(sessionId).emit('call_terminated', { sessionId, by: socket.user.id });
+    socket.on('call_end', async ({ sessionId }) => {
+      try {
+        console.log(`📞 [CALL_END] Session ${sessionId} ended by ${socket.user.id}`);
+        
+        // Notify participants first for immediate UI feedback
+        io.to(sessionId).emit('call_terminated', { sessionId, by: socket.user.id });
+
+        // End the session in database and release expert
+        const updatedSession = await ChatService.endSession(sessionId);
+        if (updatedSession?.expertId) {
+          await prisma.expert.update({
+            where: { id: updatedSession.expertId },
+            data: { onlineStatus: 'available', isOnline: true }
+          });
+          broadcastExpertStatus(updatedSession.expertId, 'available');
+        }
+
+        // Notify session closure
+        io.to(sessionId).emit('session_ended', { 
+          sessionId, 
+          status: 'COMPLETED',
+          endedAt: new Date()
+        });
+      } catch (err) {
+        console.error("❌ [CALL_END_ERROR]", err.message);
+      }
     });
 
     // ─── MESSAGE UTILITIES ────────────────────────────────────
@@ -280,79 +399,23 @@ function initializeSocket(server) {
 
     // ─── MANUAL SESSION END ───────────────────────────────────
     socket.on('end_session', async ({ sessionId }) => {
-      const now = new Date();
-      
       try {
-        const session = await prisma.chatSession.findUnique({ 
-          where: { id: sessionId },
-          include: { expert: true }
-        });
+        // Delegate to centralized ChatService (single source of truth for billing & settlement)
+        const updatedSession = await ChatService.endSession(sessionId);
         
-        if (!session || session.status === 'COMPLETED' || session.status === 'TERMINATED') return;
-
-        const startedAt = session.startedAt || session.createdAt;
-        const durationMs = now - new Date(startedAt);
-        const totalMinutes = Math.ceil(durationMs / 60000);
-        const totalAmount = session.isFreeSession ? 0 : totalMinutes * (session.pricePerMinute || 10);
-        
-        // Only bill what heartbeat hasn't already billed
-        const alreadyBilled = session.totalAmount || 0;
-        const remainingToBill = Math.max(0, totalAmount - alreadyBilled);
-
-        // Final wallet settlement for partial minute
-        if (!session.isFreeSession && remainingToBill > 0) {
-          const wallet = await prisma.wallet.findUnique({ where: { userId: session.userId } });
-          if (wallet && wallet.balance >= remainingToBill) {
-            await prisma.$transaction([
-              prisma.wallet.update({
-                where: { id: wallet.id },
-                data: {
-                  balance: { decrement: remainingToBill },
-                  totalSpent: { increment: remainingToBill },
-                },
-              }),
-              prisma.walletTransaction.create({
-                data: {
-                  walletId: wallet.id,
-                  amount: remainingToBill,
-                  type: 'DEDUCTION',
-                  status: 'COMPLETED',
-                  description: `Final settlement: ${session.type} (${totalMinutes}m)`,
-                  chatSessionId: sessionId,
-                }
-              })
-            ]);
-          }
-        }
-
-        // Close session
-        await prisma.chatSession.update({
-          where: { id: sessionId },
-          data: { status: 'COMPLETED', endedAt: now, totalAmount, totalMinutes }
-        });
-
-        // Only increment totalSessions here (minutes & earnings handled by heartbeat + remaining above)
-        if (session.expertId) {
-          const alreadyBilledMinutes = session.totalMinutes || 0;
-          const remainingMinutes = Math.max(0, totalMinutes - alreadyBilledMinutes);
-
-          await prisma.expert.update({
-            where: { id: session.expertId },
-            data: {
-              totalSessions: { increment: 1 },
-              totalMinutes: { increment: remainingMinutes },
-              totalEarnings: { increment: session.isFreeSession ? 0 : remainingToBill },
-            }
+        if (!updatedSession || updatedSession.status === 'COMPLETED' || updatedSession.status === 'TERMINATED') {
+          io.to(sessionId).emit('session_ended', { 
+            sessionId, 
+            status: updatedSession?.status || 'COMPLETED', 
+            endedAt: updatedSession?.endedAt || new Date(),
+            totalAmount: updatedSession?.totalAmount || 0,
           });
         }
 
-        io.to(sessionId).emit('session_ended', { 
-          sessionId, 
-          status: 'COMPLETED', 
-          endedAt: now,
-          totalAmount,
-        });
-
+        // Release expert status via broadcast (actual DB update handled in ChatService)
+        if (updatedSession?.expertId) {
+          broadcastExpertStatus(updatedSession.expertId, 'available');
+        }
       } catch (err) {
         console.error("❌ [END_SESSION_ERROR]", err.message);
       }
@@ -360,13 +423,83 @@ function initializeSocket(server) {
 
     // ─── DISCONNECT ───────────────────────────────────────────
     socket.on("disconnect", async () => {
-      await redis.del(`socket:${socket.user.id}`);
+      if (socket.user.id) {
+        await redis.del(`socket:${socket.user.id}`);
+        
+        // If they were in an active session, notify the partner immediately
+        const activeSess = await prisma.chatSession.findFirst({
+          where: {
+            OR: [
+              { userId: socket.user.id },
+              { expertId: socket.user.expert?.id || '' }
+            ],
+            status: { in: ['ACTIVE', 'WAITING'] }
+          }
+        });
+
+        if (activeSess) {
+          console.log(`⚠️ [DISCONNECT] Partner left active session: ${activeSess.id}`);
+          io.to(activeSess.id).emit('partner_disconnected', { 
+            userId: socket.user.id,
+            role: socket.user.role 
+          });
+
+          // If seeker leaves during an active call, we might want to end it after a timeout
+          // For now, the heartbeat will handle roomSize === 0, but we could add a roomSize === 1 timeout here
+        }
+      }
+      
+      // Expert Offline logic
+      if (socket.user.role === 'EXPERT' && socket.user.expert?.id) {
+        const expertId = socket.user.expert.id;
+        
+        // Wait a bit before marking offline to handle refreshes/flaky connections
+        setTimeout(async () => {
+          const isStillConnected = await redis.get(`socket:${socket.user.id}`);
+          if (!isStillConnected) {
+            const currentExpert = await prisma.expert.findUnique({ where: { id: expertId } });
+            
+            if (currentExpert) {
+                // If they were busy, we check if they STILL have active sessions
+                // If not, we definitely mark them offline
+                const activeSession = await prisma.chatSession.findFirst({
+                  where: {
+                    expertId,
+                    status: { in: ['ACTIVE', 'WAITING'] }
+                  }
+                });
+
+                if (!activeSession) {
+                  await prisma.expert.update({
+                    where: { id: expertId },
+                    data: { onlineStatus: 'offline', isOnline: false }
+                  });
+                  broadcastExpertStatus(expertId, 'offline');
+                } else {
+                  // Keep them busy but mark offline (they might reconnect)
+                  await prisma.expert.update({
+                    where: { id: expertId },
+                    data: { isOnline: false }
+                  });
+                  broadcastExpertStatus(expertId, 'offline');
+                }
+            }
+          }
+        }, 5000);
+      }
     });
   });
 
-  // ─── BILLING HEARTBEAT (runs once globally) ─────────────────
+  // ─── BILLING HEARTBEAT (runs once globally across instances) ───────
   if (!global.billingInterval) {
     global.billingInterval = setInterval(async () => {
+      // 🚨 SCALABILITY PROTECTOR: Acquire distributed lock for 10s
+      // This prevents multiple server instances from billing the same sessions simultaneously.
+      const lockKey = "novasathi:billing:lock";
+      const lockAcquired = await redis.set(lockKey, "locked", "NX", "EX", 10);
+      
+      if (!lockAcquired) return; // Another instance is already billing
+      
       try {
         const activeSessions = await prisma.chatSession.findMany({
           where: { status: 'ACTIVE' },
@@ -389,6 +522,16 @@ function initializeSocket(server) {
                 where: { id: sess.id },
                 data: { status: 'TERMINATED', endedAt: new Date() }
               });
+
+              // Release Expert in DB and Broadcast
+              if (sess.expertId) {
+                await prisma.expert.update({
+                  where: { id: sess.expertId },
+                  data: { onlineStatus: 'available', isOnline: true }
+                });
+                broadcastExpertStatus(sess.expertId, 'available');
+              }
+
               io.to(sess.id).emit('force_disconnect', { message: 'Session closed due to inactivity.' });
               global.roomEmptyCheck.delete(sess.id);
             }
@@ -412,6 +555,9 @@ function initializeSocket(server) {
                 data: { status: 'TERMINATED', endedAt: now }
               });
               io.to(sess.id).emit('force_disconnect', { reason: 'timeout', message: 'Free session limit reached.' });
+              
+              // Broadcast expert release
+              if (sess.expertId) broadcastExpertStatus(sess.expertId, 'available');
             } else if (remainingS % 60 === 0) {
               io.to(sess.id).emit('balance_update', { timeLeftSeconds: remainingS });
             }
@@ -423,66 +569,53 @@ function initializeSocket(server) {
           const secondsSinceLastBill = (now - new Date(lastBilled)) / 1000;
 
           if (secondsSinceLastBill >= 60) {
-            // Re-verify status to prevent billing a just-ended session
-            const currentSess = await prisma.chatSession.findUnique({ 
-              where: { id: sess.id },
-              select: { status: true, pricePerMinute: true }
-            });
+            const result = await ChatService.billSessionMinute(sess.id);
             
-            if (!currentSess || currentSess.status !== 'ACTIVE') {
-              global.roomEmptyCheck.delete(sess.id);
+            if (result === null) {
+              // Session not found or not ACTIVE — skip
               continue;
-            }
-
-            const price = currentSess.pricePerMinute || 10;
-            const wallet = sess.user.wallet;
-
-            if (!wallet || wallet.balance < price) {
-              await prisma.chatSession.update({
-                where: { id: sess.id },
-                data: { status: 'TERMINATED', endedAt: now }
+            } else if (result.status === 'TERMINATED') {
+              // billSessionMinute returns updated session with status TERMINATED when balance insufficient
+              io.to(sess.id).emit('force_disconnect', { 
+                reason: 'balance_exhausted', 
+                message: 'Wallet balance exhausted.' 
               });
-              io.to(sess.id).emit('force_disconnect', { reason: 'balance_exhausted', message: 'Wallet balance exhausted.' });
-            } else {
-              // Atomic per-minute billing
-              await prisma.$transaction([
-                prisma.wallet.update({
-                  where: { id: wallet.id },
-                  data: { balance: { decrement: price }, totalSpent: { increment: price } }
-                }),
-                prisma.chatSession.update({
-                  where: { id: sess.id },
-                  data: { lastBilledAt: now, totalAmount: { increment: price }, totalMinutes: { increment: 1 } }
-                }),
-                prisma.expert.update({
-                  where: { id: sess.expertId },
-                  data: { 
-                    totalEarnings: { increment: price },
-                    totalMinutes: { increment: 1 }
-                  }
-                }),
-                prisma.walletTransaction.create({
-                  data: {
-                    walletId: wallet.id,
-                    amount: price,
-                    type: 'DEDUCTION',
-                    status: 'COMPLETED',
-                    description: `1 min consultation (${sess.type})`,
-                    chatSessionId: sess.id,
-                  }
-                })
-              ]);
               
-              const newBalance = wallet.balance - price;
+              // Broadcast expert release
+              if (sess.expertId) broadcastExpertStatus(sess.expertId, 'available');
+            } else if (Array.isArray(result)) {
+              // Successfully billed a minute — result is a Prisma $transaction array
+              // Get updated balances to broadcast
+              const [updatedUserWallet, partnerWallet] = await Promise.all([
+                prisma.wallet.findUnique({ where: { userId: sess.userId } }),
+                sess.expertId 
+                  ? prisma.wallet.findFirst({ where: { user: { expert: { id: sess.expertId } } } })
+                  : sess.counselorId
+                    ? prisma.wallet.findFirst({ where: { user: { counselor: { id: sess.counselorId } } } })
+                    : null
+              ]);
+
+              const price = sess.pricePerMinute || 10;
+              
+              // 1. Notify Room (Both see updated time left + their respective balances)
               io.to(sess.id).emit('balance_update', { 
-                newBalance,
-                timeLeftSeconds: Math.floor(newBalance / price * 60)
+                newBalance: updatedUserWallet?.balance, // Seeker balance
+                expertBalance: partnerWallet?.balance, // Expert/Counselor balance
+                timeLeftSeconds: updatedUserWallet ? Math.floor(updatedUserWallet.balance / price * 60) : 0
               });
 
-              io.to(`portal:${sess.expertId}`).emit('earnings_update', { 
-                amount: price,
-                sessionId: sess.id 
-              });
+              // 2. Notify Expert/Counselor specifically (earnings update for portal)
+              const partnerId = sess.expertId || sess.counselorId;
+              if (partnerId) {
+                const earningsData = { 
+                  amount: price,
+                  newTotalBalance: partnerWallet?.balance,
+                  sessionId: sess.id 
+                };
+                io.to(`portal:${partnerId}`).emit('earnings_update', earningsData);
+                // Also emit to session room so expert in chat screen gets it
+                io.to(sess.id).emit('earnings_update', earningsData);
+              }
             }
           }
         }
@@ -500,4 +633,4 @@ const getIO = () => {
   return io;
 };
 
-module.exports = { initializeSocket, getIO };
+module.exports = { initializeSocket, getIO, broadcastExpertStatus };

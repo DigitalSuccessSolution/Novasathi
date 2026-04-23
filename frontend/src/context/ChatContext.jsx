@@ -1,92 +1,43 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useEffect, useCallback, useMemo } from 'react';
+import { useSelector, useDispatch } from 'react-redux';
 import socket from '../lib/socket';
 import { useAuth } from './AuthContext';
 import IntakeForm from '../components/IntakeForm';
 import { toast } from 'react-hot-toast';
+import { useNavigate } from 'react-router-dom';
+import api from '../lib/api';
 
+import { 
+    setSessions, 
+    setCurrentMessages, 
+    addMessage, 
+    updateMessageStatus, 
+    setActiveSessionId, 
+    setPendingRitualRequest, 
+    setIsChatOpen, 
+    setMinimized, 
+    setIntakeConfig, 
+    updateSessionInList 
+} from '../store/slices/chatSlice';
+import { setPendingInitiation } from '../store/slices/callSlice';
+
+import { fetchSessions, fetchMessages, endSession, acceptSession } from '../store/thunks/chatThunks';
+import { updateWalletBalance } from '../store/slices/authSlice';
 
 const ChatContext = createContext();
 
 export const ChatProvider = ({ children }) => {
-    const { user, token, api, updateWalletBalance } = useAuth();
+    const dispatch = useDispatch();
+    const { user, token } = useAuth();
+    const { activeSessionId, intakeConfig } = useSelector(state => state.chat);
+    const navigate = useNavigate();
+    const notificationRef = React.useRef(null);
 
-    // ─── Data State ───
-    const [sessions, setSessions] = useState([]);
-    const [currentMessages, setCurrentMessages] = useState([]);
-    const [activeSessionId, setActiveSessionId] = useState(null);
-    const [loading, setLoading] = useState(false);
-    const [pendingRitualRequest, setPendingRitualRequest] = useState(null);
-
-    // ─── Global Overlay State (WhatsApp-style) ───
-    const [isChatOpen, setIsChatOpen] = useState(false);
-    const [minimized, setMinimized] = useState(false);
-
-    // ─── Intake State ───
-    const [intakeConfig, setIntakeConfig] = useState({
-        isOpen: false,
-        expertId: null,
-        expert: null,
-        isRandom: false,
-        sessionType: 'CHAT'
-    });
-
-    // ─── Session Grouping (latest session per partner) ───
-    const groupSessions = useCallback((allSessions) => {
-        if (!user?.id) return allSessions;
-        const grouped = allSessions.reduce((acc, sess) => {
-            const partnerId = user.id === sess.userId ? (sess.expertId || sess.counselorId) : sess.userId;
-            if (!partnerId) return acc;
-            if (!acc[partnerId] || new Date(sess.updatedAt) > new Date(acc[partnerId].updatedAt)) {
-                acc[partnerId] = sess;
-            }
-            return acc;
-        }, {});
-        return Object.values(grouped).sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
-    }, [user?.id]);
-
-    // ─── Fetch Sessions ───
-    const fetchSessions = useCallback(async () => {
-        if (!token || !user?.id) return;
-        try {
-            let sidebarSessions = [];
-            if (user.role === 'ADMIN') {
-                const res = await api.get("/admin/sessions");
-                const data = res.data.data;
-                sidebarSessions = data.sessions || data || [];
-            } else if (user.role === 'EXPERT') {
-                const res = await api.get("/experts/overview");
-                sidebarSessions = res.data.data.expert.chatSessions || [];
-            } else {
-                const res = await api.get("/chat/my-sessions");
-                sidebarSessions = res.data.data || [];
-            }
-            setSessions(user.role === 'ADMIN' ? sidebarSessions : groupSessions(sidebarSessions));
-        } catch (err) {
-            console.error("❌ [SESSIONS_FETCH_ERROR]", err);
-        }
-    }, [token, user?.id, user?.role, api, groupSessions]);
-
-    // ─── Fetch Messages ───
-    const fetchMessages = useCallback(async (sessionId) => {
-        if (!token || !sessionId) return;
-        try {
-            setLoading(true);
-            const res = await api.get(`/chat/session/${sessionId}/messages`);
-            setCurrentMessages(res.data.data.messages || []);
-            
-            const sessRes = await api.get(`/chat/session/${sessionId}`);
-            const sessData = sessRes.data.data;
-            
-            if (user?.id === sessData.userId) {
-                const bal = sessData.walletBalance;
-                if (bal !== undefined) updateWalletBalance(bal);
-            }
-        } catch (err) {
-            console.error("❌ [MESSAGES_FETCH_ERROR]", err);
-        } finally {
-            setLoading(false);
-        }
-    }, [token, api, user?.id, updateWalletBalance]);
+    // Initialize notification sound
+    useEffect(() => {
+        notificationRef.current = new Audio('https://assets.mixkit.co/active_storage/sfx/2358/2358-preview.mp3');
+        return () => { if (notificationRef.current) notificationRef.current = null; };
+    }, []);
 
     // ─── Socket Event Handlers ───
     useEffect(() => {
@@ -108,63 +59,63 @@ export const ChatProvider = ({ children }) => {
 
         const handleNewMessage = (msg) => {
             if (activeSessionId === msg.sessionId) {
-                setCurrentMessages(prev => {
-                    const exists = prev.find(m => m.content === msg.content && m.senderId === msg.senderId && m.isOptimistic);
-                    if (exists) {
-                        return prev.map(m => m.id === exists.id ? msg : m);
-                    }
-                    if (prev.find(m => m.id === msg.id)) return prev;
-                    return [...prev, msg];
-                });
+                dispatch(addMessage(msg));
                 socket.emit('mark_read', { sessionId: msg.sessionId });
             }
 
-            setSessions(prev => {
-                const existingIndex = prev.findIndex(s => s.id === msg.sessionId);
+            // Update sidebar session unread count
+            dispatch((dispatch, getState) => {
+                const { sessions } = getState().chat;
+                const existingIndex = sessions.findIndex(s => s.id === msg.sessionId);
                 if (existingIndex !== -1) {
-                    const updated = [...prev];
-                    const session = { ...updated[existingIndex] };
-                    session.updatedAt = new Date();
-                    session.messages = [msg]; // Only keep last message for sidebar
+                    const session = { ...sessions[existingIndex] };
+                    session.updatedAt = new Date().toISOString();
+                    session.messages = [msg];
                     session._unreadCount = (session._unreadCount || 0) + (activeSessionId === msg.sessionId ? 0 : 1);
-                    updated[existingIndex] = session;
-                    return updated.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+                    dispatch(updateSessionInList(session));
+                    // Re-sort after updating
+                    const updatedSessions = [...getState().chat.sessions].sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+                    dispatch(setSessions(updatedSessions));
                 }
-                return prev;
             });
         };
 
-        const handleNewRequest = ({ session }) => {
-            if (user?.role === 'EXPERT' && (session.type === 'CHAT' || !session.type)) {
-                setSessions(prev => groupSessions([session, ...prev]));
-                setPendingRitualRequest(session);
-                socket.emit('join_chat', { sessionId: session.id });
-            }
-        };
+        // ─── Legacy ritual request listener removed, now handled by CallContext unified incoming_call ───
 
         const handleEnded = (data) => {
-            setSessions(prev => prev.map(s => s.id === data.sessionId ? { ...s, status: 'COMPLETED' } : s));
+            dispatch((dispatch, getState) => {
+                const { sessions } = getState().chat;
+                const session = sessions.find(s => s.id === data.sessionId);
+                if (session) {
+                    dispatch(updateSessionInList({ ...session, status: 'COMPLETED' }));
+                }
+            });
         };
 
         const handleRead = ({ sessionId }) => {
             if (activeSessionId === sessionId) {
-                setCurrentMessages(prev => prev.map(m => ({ ...m, isRead: true })));
+                dispatch((dispatch, getState) => {
+                    const { currentMessages } = getState().chat;
+                    dispatch(setCurrentMessages(currentMessages.map(m => ({ ...m, isRead: true }))));
+                });
             }
         };
 
         const handleReaction = ({ messageId, reaction }) => {
-            setCurrentMessages(prev => prev.map(m => m.id === messageId ? { ...m, reaction } : m));
+            dispatch((dispatch, getState) => {
+                const { currentMessages } = getState().chat;
+                dispatch(setCurrentMessages(currentMessages.map(m => m.id === messageId ? { ...m, reaction } : m)));
+            });
         };
 
         const handleBalance = (data) => {
             if (data.newBalance !== undefined) {
-                updateWalletBalance(data.newBalance);
+                dispatch(updateWalletBalance(data.newBalance));
             }
         };
 
         socket.on('connect', onConnect);
         socket.on('new_message', handleNewMessage);
-        socket.on('new_ritual_request', handleNewRequest);
         socket.on('session_ended', handleEnded);
         socket.on('force_disconnect', handleEnded);
         socket.on('messages_read', handleRead);
@@ -176,23 +127,80 @@ export const ChatProvider = ({ children }) => {
         return () => {
             socket.off('connect', onConnect);
             socket.off('new_message', handleNewMessage);
-            socket.off('new_ritual_request', handleNewRequest);
             socket.off('session_ended', handleEnded);
             socket.off('force_disconnect', handleEnded);
             socket.off('messages_read', handleRead);
             socket.off('react_message', handleReaction);
             socket.off('balance_update', handleBalance);
         };
-    }, [token, activeSessionId, user]);
+    }, [token, activeSessionId, user, dispatch]);
 
-    // Initial fetch - Only on cosmic initiation or soul-switch
+    // Initial fetch
     useEffect(() => { 
         if (token && user?.id) {
-            fetchSessions(); 
+            dispatch(fetchSessions()); 
         }
-    }, [token, user?.id]);
+    }, [token, user?.id, dispatch]);
 
-    // ─── Send Message ───
+    const handleIntakeSubmit = async (formData) => {
+        try {
+            const startRes = await api.post('/chat/start', {
+                expertId: intakeConfig.expertId,
+                intakeData: formData,
+                isRandom: intakeConfig.isRandom,
+                type: intakeConfig.sessionType
+            });
+            const session = startRes.data.data.session || startRes.data.data;
+            
+            // Only navigate for text-based chat sessions
+            if (intakeConfig.sessionType.toLowerCase() === 'chat') {
+                const path = `/chat/${session.id}?autoCall=true&type=chat`;
+                navigate(path);
+            } else {
+                // For Audio/Video, stay on current page and trigger call initiation
+                dispatch(setPendingInitiation({
+                    sessionId: session.id,
+                    type: intakeConfig.sessionType.toLowerCase() === 'video' ? 'video' : 'voice',
+                    partner: {
+                        name: intakeConfig.expert?.displayName || "Expert",
+                        avatar: intakeConfig.expert?.profileImage || null
+                    }
+                }));
+                toast.success("Requesting spiritual connection...");
+            }
+            
+            dispatch(setIntakeConfig({ isOpen: false }));
+        } catch (err) {
+            console.error("Intake submission failed:", err);
+            toast.error(err.response?.data?.message || "Failed to start session. Please try again.");
+            throw err;
+        }
+    };
+
+    return (
+        <ChatContext.Provider value={{}}>
+            {children}
+            <IntakeForm 
+                isOpen={intakeConfig.isOpen}
+                onClose={() => dispatch(setIntakeConfig({ isOpen: false }))}
+                onSubmit={handleIntakeSubmit}
+                expert={intakeConfig.expert}
+                isRandom={intakeConfig.isRandom}
+            />
+        </ChatContext.Provider>
+    );
+};
+
+// ─── Custom Hook Replacement for useChat ───
+export const useChat = () => {
+    const dispatch = useDispatch();
+    const chatState = useSelector(state => state.chat);
+    const { user } = useAuth();
+    const navigate = useNavigate();
+
+    const fetchSessionsWrapped = useCallback(() => dispatch(fetchSessions()), [dispatch]);
+    const fetchMessagesWrapped = useCallback((sessionId) => dispatch(fetchMessages(sessionId)), [dispatch]);
+
     const sendMessage = useCallback((sessionId, content, type = 'TEXT', overrideSenderId = null) => {
         if (!socket.connected) socket.connect();
         
@@ -203,163 +211,89 @@ export const ChatProvider = ({ children }) => {
             senderId: overrideSenderId || user.id,
             content,
             messageType: type,
-            createdAt: new Date(),
+            createdAt: new Date().toISOString(),
             isRead: false,
             isOptimistic: true,
             sender: { name: user.name, avatar: user.avatar, role: user.role }
         };
 
-        if (activeSessionId === sessionId) {
-            setCurrentMessages(prev => [...prev, optimisticMsg]);
+        if (chatState.activeSessionId === sessionId) {
+            dispatch(addMessage(optimisticMsg));
         }
 
         socket.emit('send_message', {
             sessionId,
             content,
             messageType: type,
+            tempId,
             overrideSenderId,
         });
-    }, [user, activeSessionId]);
+    }, [user, chatState.activeSessionId, dispatch]);
 
-    // ─── React to Message ───
     const reactToMessage = useCallback((messageId, reaction) => {
         if (!socket.connected) return;
-        setCurrentMessages(prev => prev.map(m => m.id === messageId ? { ...m, reaction } : m));
+        dispatch((dispatch, getState) => {
+            const { currentMessages } = getState().chat;
+            dispatch(setCurrentMessages(currentMessages.map(m => m.id === messageId ? { ...m, reaction } : m)));
+        });
         socket.emit('react_message', { messageId, reaction });
-    }, []);
+    }, [dispatch]);
 
-    // ─── Clear Unread Count ───
     const clearUnread = useCallback((sessionId) => {
-        setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, _unreadCount: 0 } : s));
-    }, []);
+        dispatch((dispatch, getState) => {
+            const { sessions } = getState().chat;
+            const session = sessions.find(s => s.id === sessionId);
+            if (session) {
+                dispatch(updateSessionInList({ ...session, _unreadCount: 0 }));
+            }
+        });
+    }, [dispatch]);
 
-    // ─── Global Chat Overlay Controls ───
     const openChat = useCallback((sessionId) => {
-        setActiveSessionId(sessionId);
-        setIsChatOpen(true);
-        setMinimized(false);
+        dispatch(setActiveSessionId(sessionId));
+        dispatch(setIsChatOpen(true));
+        dispatch(setMinimized(false));
         clearUnread(sessionId);
-    }, [clearUnread]);
+    }, [dispatch, clearUnread]);
 
     const closeChat = useCallback(() => {
-        setIsChatOpen(false);
-        setMinimized(false);
-    }, []);
+        dispatch(setIsChatOpen(false));
+        dispatch(setMinimized(false));
+    }, [dispatch]);
 
-    const startAndOpenChat = useCallback(async (expertId, isRandom = false, expert = null, type = 'CHAT') => {
-        try {
-            // Check for existing active session first
-            const res = await api.get("/chat/my-sessions");
-            const allSessions = res.data.data || [];
-            const activeSess = allSessions.find(s => 
-                (s.expertId === expertId || s.counselorId === expertId) && 
-                s.status !== 'COMPLETED' && s.status !== 'TERMINATED'
-            );
-            
-            if (activeSess) {
-                openChat(activeSess.id);
-            } else {
-                // Trigger Intake Form
-                setIntakeConfig({
-                    isOpen: true,
-                    expertId,
-                    expert,
-                    isRandom,
-                    sessionType: type
-                });
-            }
-        } catch (err) {
-            console.error("Failed to start chat:", err);
-            toast.error("An error occurred. Please try again.");
-        }
-    }, [api, openChat]);
+    const startAndOpenChat = useCallback((expertId, expertData, isRandom = false, sessionType = 'CHAT') => {
+        dispatch(setIntakeConfig({
+            isOpen: true,
+            expertId,
+            expert: expertData,
+            isRandom,
+            sessionType
+        }));
+    }, [dispatch]);
 
-    const handleIntakeSubmit = async (formData) => {
-        try {
-            // 1. Submit Intake
-            const intakeRes = await api.post("/chat/intake", {
-                ...formData,
-                expertId: intakeConfig.expertId,
-                isRandom: intakeConfig.isRandom
-            });
-            
-            const { sessionId } = intakeRes.data.data;
+    // Legacy accept/reject functions removed as it is now handled by CallManager respondToCall
 
-            // 2. Start Real Session using the intake-created session ID
-            const startRes = await api.post("/chat/start", { 
-                sessionId,
-                isRandom: intakeConfig.isRandom,
-                type: intakeConfig.sessionType
-            });
+    // Expose setters
+    const setSessionId = useCallback((id) => dispatch(setActiveSessionId(id)), [dispatch]);
+    const setChatOpen = useCallback((isOpen) => dispatch(setIsChatOpen(isOpen)), [dispatch]);
+    const setChatMinimized = useCallback((isMin) => dispatch(setMinimized(isMin)), [dispatch]);
 
-            const session = startRes.data.data.session || startRes.data.data;
-            
-            // If it's a call/video, we navigate to the chat screen which handles the auto-call logic
-            const { useNavigate } = require('react-router-dom');
-            // Wait, we can't use hooks like this. I'll pass a redirect or just open the chat screen.
-            // Since ChatScreen handles autoCall from URL params, we can just navigate.
-            
-            const path = `/chat/${session.id}?autoCall=true&type=${intakeConfig.sessionType.toLowerCase()}`;
-            window.location.href = path; // Simplest way since we are outside a component context in callbacks
-            
-            setIntakeConfig(prev => ({ ...prev, isOpen: false }));
-            toast.success("Connecting with your spiritual guide...");
-        } catch (err) {
-            console.error("Intake submission failed:", err);
-            toast.error(err.response?.data?.message || "Failed to start session. Please try again.");
-            throw err;
-        }
-    };
-
-    const rejectRitual = useCallback(async (sessionId) => {
-        try {
-            await api.post(`/chat/session/${sessionId}/end`);
-            setPendingRitualRequest(null);
-        } catch (err) {
-            console.error("❌ [REJECT_RITUAL_ERROR]", err);
-            setPendingRitualRequest(null);
-        }
-    }, [api]);
-
-    const acceptRitual = useCallback((sessionId) => {
-        setPendingRitualRequest(null);
-        window.location.href = `/expert/chat/${sessionId}`;
-    }, []);
-
-    return (
-        <ChatContext.Provider value={{
-            sessions,
-            currentMessages,
-            activeSessionId,
-            loading,
-            isChatOpen,
-            minimized,
-            pendingRitualRequest,
-            setActiveSessionId,
-            setIsChatOpen,
-            setMinimized,
-            openChat,
-            closeChat,
-            startAndOpenChat,
-            clearUnread,
-            fetchMessages,
-            fetchSessions,
-            sendMessage,
-            reactToMessage,
-            acceptRitual,
-            rejectRitual
-        }}>
-            {children}
-            
-            <IntakeForm 
-                isOpen={intakeConfig.isOpen}
-                onClose={() => setIntakeConfig(prev => ({ ...prev, isOpen: false }))}
-                onSubmit={handleIntakeSubmit}
-                expert={intakeConfig.expert}
-                isRandom={intakeConfig.isRandom}
-            />
-        </ChatContext.Provider>
-    );
+    return useMemo(() => ({
+        ...chatState,
+        setActiveSessionId: setSessionId,
+        setIsChatOpen: setChatOpen,
+        setMinimized: setChatMinimized,
+        openChat,
+        closeChat,
+        startAndOpenChat,
+        clearUnread,
+        fetchMessages: fetchMessagesWrapped,
+        fetchSessions: fetchSessionsWrapped,
+        sendMessage,
+        reactToMessage
+    }), [
+        chatState, setSessionId, setChatOpen, setChatMinimized,
+        openChat, closeChat, startAndOpenChat, clearUnread,
+        fetchMessagesWrapped, fetchSessionsWrapped, sendMessage, reactToMessage
+    ]);
 };
-
-export const useChat = () => useContext(ChatContext);

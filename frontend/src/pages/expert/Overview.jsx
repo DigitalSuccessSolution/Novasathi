@@ -17,6 +17,7 @@ const ExpertOverview = () => {
     const navigate = useNavigate();
     const { initiateCall } = useCall();
     const [isOnline, setIsOnline] = useState(false);
+    const [onlineStatus, setOnlineStatus] = useState("offline");
     const [stats, setStats] = useState([
         { label: "Total Income", value: "₹0", sub: "Lifetime", icon: IndianRupee, color: "text-emerald-400" },
         { label: "Active Minutes", value: "0", sub: "Lifetime", icon: Clock, color: "text-blue-400" },
@@ -58,6 +59,7 @@ const ExpertOverview = () => {
             ]);
 
             setIsOnline(data.expert.isOnline);
+            setOnlineStatus(data.expert.onlineStatus || "offline");
             setSessions(data.expert.chatSessions || []);
             
             // SRS §8.4 — Detect if profile is just a draft (needs onboarding)
@@ -115,21 +117,26 @@ const ExpertOverview = () => {
              toast(`🔮 ${data.user || "A Seeker"} is waiting in the sanctuary!`, "success");
         };
 
-        const onIncomingCall = (data) => {
-            handleRefresh();
-            toast(`📞 Incoming ${data.type} call from ${data.callerName}! Open chat rituals immediately.`);
+        // Global CallManager handles incoming_call via CallContext
+        // Removing redundant local listener to prevent duplicate notifications
+
+        const handleStatusUpdate = ({ expertId, status }) => {
+            if (user?.expert?.id === expertId || user?.id === expertId) {
+                setOnlineStatus(status);
+                setIsOnline(status !== 'offline');
+            }
         };
 
+        socket.on("expert_status_update", handleStatusUpdate);
         socket.on("earnings_update", handleEarningsUpdate);
         socket.on("new_ritual_request", onNewRitual);
         socket.on("session_waiting", onSessionWaiting);
-        socket.on("incoming_call", onIncomingCall);
         
         return () => {
+            socket.off("expert_status_update", handleStatusUpdate);
             socket.off("earnings_update", handleEarningsUpdate);
             socket.off("new_ritual_request", onNewRitual);
             socket.off("session_waiting", onSessionWaiting);
-            socket.off("incoming_call", onIncomingCall);
         };
     }, [token, handleRefresh, toast]);
 
@@ -265,7 +272,9 @@ const ExpertOverview = () => {
                     <div className="p-4 bg-white/2 border border-white/5 rounded-2xl flex items-center gap-8">
                          <div className="flex flex-col text-left">
                               <span className="text-[8px] font-sans font-semibold  tracking-widest text-white/85">Availability</span>
-                              <span className={`text-xs font-semibold  tracking-widest ${isOnline ? 'text-emerald-400' : 'text-rose-500'}`}>{isOnline ? 'Online' : 'Offline'}</span>
+                              <span className={`text-xs font-semibold  tracking-widest ${onlineStatus === 'busy' ? 'text-amber-400' : isOnline ? 'text-emerald-400' : 'text-rose-500'}`}>
+                                   {onlineStatus === 'busy' ? 'Busy' : isOnline ? 'Online' : 'Offline'}
+                              </span>
                          </div>
                          <button 
                             onClick={toggleOnlineStatus}

@@ -1,12 +1,14 @@
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 const prisma = require('../../config/prisma');
 const redis = require('../../config/redis');
 const catchAsync = require('../../utils/catchAsync');
 const AppError = require('../../utils/AppError');
 const ApiResponse = require('../../utils/ApiResponse');
-const { admin } = require('../../config/firebase');
-const { generateOTP } = require('../../utils/encryption');
+const AuthService = require('./auth.service');
 const NotificationEngine = require('../notification/notification.service');
+const { generateOTP } = require('../../utils/encryption');
+const { admin } = require('../../config/firebase');
 
 const signToken = (id, role) => {
   return jwt.sign({ id, role }, process.env.JWT_SECRET, {
@@ -23,9 +25,12 @@ const signRefreshToken = (id) => {
 /**
  * Helper to send token via Cookie (SRS §1.x)
  */
-const sendCookieResponse = (user, statusCode, res, message, additionalData = {}) => {
+const sendCookieResponse = async (user, statusCode, res, message, additionalData = {}) => {
   const token = signToken(user.id, user.role);
   const refreshToken = signRefreshToken(user.id);
+
+  // Store refresh token in Redis (SRS §1.2 - centralized)
+  await redis.setex(`refresh:${user.id}`, 30 * 24 * 60 * 60, refreshToken);
 
   const cookieOptions = {
     expires: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
@@ -102,7 +107,7 @@ exports.verifyOTP = catchAsync(async (req, res, next) => {
     return next(new AppError('Phone number and OTP are required.', 400));
   }
 
-  // SRS §1.2 — Check lockout
+  // 1. Check lockout
   const lockKey = `otp_lock:${phone}`;
   const isLocked = await redis.get(lockKey);
   if (isLocked) {
@@ -112,22 +117,20 @@ exports.verifyOTP = catchAsync(async (req, res, next) => {
 
   const user = await prisma.user.findUnique({ 
     where: { phone },
-    include: { expert: { select: { status: true } } }
+    include: { expert: { select: { id: true, status: true } } }
   });
 
   if (!user) {
     return next(new AppError('No account found with this phone number.', 404));
   }
 
-  // Validate OTP
+  // 2. Validate OTP
   if (user.otp !== otp || new Date() > new Date(user.otpExpiry)) {
-    // SRS §1.2 — Track failed attempts in Redis
     const attemptsKey = `otp_attempts:${phone}`;
     const attempts = await redis.incr(attemptsKey);
-    await redis.expire(attemptsKey, 3600); // 1 hour window
+    await redis.expire(attemptsKey, 3600);
 
     if (attempts >= 3) {
-      // Lock for 15 minutes
       await redis.setex(lockKey, 900, 'locked');
       await redis.del(attemptsKey);
       return next(new AppError('Too many failed attempts. Account locked for 15 minutes.', 429));
@@ -136,104 +139,34 @@ exports.verifyOTP = catchAsync(async (req, res, next) => {
     return next(new AppError(`Invalid or expired OTP. ${3 - attempts} attempts remaining.`, 401));
   }
 
-  // OTP is valid — clear attempt counter
+  // 3. Clear attempt counter & OTP
   await redis.del(`otp_attempts:${phone}`);
-
-  // Check if this is first login (signup bonus)
-  const isNewUser = !user.signupBonusUsed;
-
-  // SRS §1.3 — Early Bird whitelist check
-  const earlyBirdEntry = await prisma.earlyBirdWhitelist.findUnique({ where: { phone } });
-  const isEarlyBird = !!earlyBirdEntry;
-
-  // Clear OTP & set early bird status
-  const updatedUser = await prisma.user.update({
-    where: { id: user.id },
-    data: { 
-      otp: null, 
-      otpExpiry: null,
-      isEarlyBird,
-      userTag: isEarlyBird ? 'Early_Bird_User' : 'General_User',
-    },
-  });
-
-  // Create wallet if doesn't exist
-  let wallet = await prisma.wallet.findUnique({ where: { userId: user.id } });
-  if (!wallet) {
-    wallet = await prisma.wallet.create({ data: { userId: user.id } });
-  }
-
-  // SRS §3.2 — Create or refresh daily free allocation
-  const settings = await prisma.adminSettings.findUnique({ where: { id: 'global' } });
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-
-  const existingAlloc = await prisma.freeAllocation.findUnique({
-    where: { userId_allocDate: { userId: user.id, allocDate: today } }
-  });
-
-  if (!existingAlloc) {
-    const shouldAllocate = isNewUser || 
-      settings?.freeMinutesResetType === 'daily' || 
-      isEarlyBird;
-
-    if (shouldAllocate) {
-      const chatMins = isEarlyBird ? 5 : (settings?.freeMinutesSignup || 5);
-      const callMins = isEarlyBird ? 5 : 0; // Early birds get separate call minutes
-
-      await prisma.freeAllocation.create({
-        data: {
-          userId: user.id,
-          allocDate: today,
-          chatMinutesTotal: chatMins,
-          callMinutesTotal: callMins,
-        }
-      });
-    }
-  }
-
-  // Signup bonus notification
-  if (isNewUser) {
-    await prisma.user.update({
-      where: { id: user.id },
-      data: { signupBonusUsed: true }
-    });
-
-    const bonusMsg = isEarlyBird 
-      ? '🎉 Welcome Early Bird! You get 5 FREE chat + 5 FREE call minutes daily!'
-      : '🎉 Welcome to NovaSathi! You\'ve received 5 free minutes to start.';
-
-    await NotificationEngine.send({
-      userId: user.id,
-      title: 'welcome to novasathi!',
-      message: bonusMsg.toLowerCase(),
-      type: 'PROMO',
-    });
-  }
-
-  // Issue tokens
-  const token = signToken(user.id, user.role);
-  const refreshToken = signRefreshToken(user.id);
-
-  // Store refresh token in Redis
-  await redis.setex(`refresh:${user.id}`, 30 * 24 * 60 * 60, refreshToken);
-
-  // Clear OTP from Redis
   await redis.del(`otp:${phone}`);
+  
+  // 4. Provision user via Centralized AuthService (Handles Wallet, Early Bird, etc.)
+  const { user: provisionedUser, isNewUser } = await AuthService.provisionUser(phone);
+  
+  // Clear OTP from DB
+  await prisma.user.update({
+    where: { id: provisionedUser.id },
+    data: { otp: null, otpExpiry: null, signupBonusUsed: isNewUser ? true : provisionedUser.signupBonusUsed }
+  });
 
-  // Issue tokens via cookies
-  sendCookieResponse({
-    id: updatedUser.id,
-    phone: updatedUser.phone,
-    name: updatedUser.name,
-    role: updatedUser.role,
-    avatar: updatedUser.avatar,
-    isEarlyBird: updatedUser.isEarlyBird,
-    userTag: updatedUser.userTag,
+  const wallet = await prisma.wallet.findUnique({ where: { userId: provisionedUser.id } });
+
+  // 5. Success response
+  await sendCookieResponse({
+    id: provisionedUser.id,
+    phone: provisionedUser.phone,
+    name: provisionedUser.name,
+    role: provisionedUser.role,
+    avatar: provisionedUser.avatar,
+    isEarlyBird: provisionedUser.isEarlyBird,
+    userTag: provisionedUser.userTag,
     isNewUser,
-    serverStatus: user.expert?.status || (user.role === 'EXPERT' ? 'PENDING' : null),
+    serverStatus: provisionedUser.expert?.status || (provisionedUser.role === 'EXPERT' ? 'PENDING' : null),
   }, 200, res, 'Logged in successfully', {
-    wallet: { balance: wallet.balance }
+    wallet: { balance: wallet?.balance || 0 }
   });
 });
 
@@ -258,7 +191,10 @@ exports.refreshToken = catchAsync(async (req, res, next) => {
     return next(new AppError('Invalid refresh token. Please login again.', 401));
   }
 
-  const user = await prisma.user.findUnique({ where: { id: decoded.id } });
+  const user = await prisma.user.findUnique({
+    where: { id: decoded.id },
+    include: { expert: { select: { id: true, status: true } } }
+  });
   if (!user || !user.isActive) {
     return next(new AppError('User not found or deactivated.', 401));
   }
@@ -268,8 +204,8 @@ exports.refreshToken = catchAsync(async (req, res, next) => {
     where: { userId: user.id }
   });
 
-  // Rotate tokens via standard cookie helper
-  sendCookieResponse({
+  // Rotate tokens via standard cookie helper (centralized generation & storage)
+  await sendCookieResponse({
     id: user.id,
     phone: user.phone,
     name: user.name,
@@ -295,21 +231,20 @@ exports.loginExpert = catchAsync(async (req, res, next) => {
 
   const user = await prisma.user.findUnique({ 
     where: { email },
-    include: { expert: { select: { status: true } } }
+    include: { expert: { select: { id: true, status: true } } }
   });
   if (!user || user.role !== 'EXPERT' || !user.password) {
     return next(new AppError('Invalid credentials or access level.', 401));
   }
 
   // Check password
-  const bcrypt = require('bcryptjs');
   const isCorrect = await bcrypt.compare(password, user.password);
   if (!isCorrect) {
     return next(new AppError('Incorrect password.', 401));
   }
 
   // Issue tokens via cookies
-  sendCookieResponse({
+  await sendCookieResponse({
     id: user.id,
     phone: user.phone,
     name: user.name,
@@ -334,14 +269,13 @@ exports.loginAdmin = catchAsync(async (req, res, next) => {
     return next(new AppError('Unauthorized access levels or incorrect credentials.', 401));
   }
 
-  const bcrypt = require('bcryptjs');
   const isCorrect = await bcrypt.compare(password, user.password);
   if (!isCorrect) {
     return next(new AppError('Incorrect password.', 401));
   }
 
   // Issue tokens via cookies
-  sendCookieResponse({
+  await sendCookieResponse({
     id: user.id,
     phone: user.phone,
     name: user.name,
@@ -373,7 +307,6 @@ exports.registerAdmin = catchAsync(async (req, res, next) => {
     return next(new AppError('User with this email or phone already exists.', 400));
   }
 
-  const bcrypt = require('bcryptjs');
   const hashedPassword = await bcrypt.hash(password, 12);
 
   const user = await prisma.user.create({
@@ -387,20 +320,13 @@ exports.registerAdmin = catchAsync(async (req, res, next) => {
     }
   });
 
-  const token = signToken(user.id, user.role);
-  const refreshToken = signRefreshToken(user.id);
-  await redis.setex(`refresh:${user.id}`, 30 * 24 * 60 * 60, refreshToken);
-
-  res.status(201).json(new ApiResponse(201, {
-    user: {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      role: user.role,
-    },
-    token,
-    refreshToken
-  }, 'Super Admin account initialized successfully.'));
+  // Issue tokens via cookies
+  await sendCookieResponse({
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+  }, 201, res, 'Super Admin account initialized successfully.');
 });
 
 /**
@@ -425,7 +351,6 @@ exports.signupExpert = catchAsync(async (req, res, next) => {
   }
 
   // Hash password
-  const bcrypt = require('bcryptjs');
   const hashedPassword = await bcrypt.hash(password, 12);
 
   // Create User as EXPERT
@@ -453,23 +378,16 @@ exports.signupExpert = catchAsync(async (req, res, next) => {
     }
   });
 
-  // Issue tokens
-  const token = signToken(user.id, user.role);
-  const refreshToken = signRefreshToken(user.id);
-  await redis.setex(`refresh:${user.id}`, 30 * 24 * 60 * 60, refreshToken);
-
-  res.status(201).json(new ApiResponse(201, {
-    user: {
-      id: user.id,
-      phone: user.phone,
-      name: user.name,
-      email: user.email,
-      role: user.role,
-      serverStatus: 'PENDING',
-    },
-    token,
-    refreshToken
-  }, 'Expert account created successfully. Welcome to the Sanctuary.'));
+  // Issue tokens via cookies
+  await sendCookieResponse({
+    id: user.id,
+    phone: user.phone,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    expert: { id: expert.id, status: expert.status },
+    serverStatus: 'PENDING',
+  }, 201, res, 'Expert account created successfully. Welcome to the Sanctuary.');
 });
 
 /**
@@ -515,47 +433,19 @@ exports.firebaseLogin = catchAsync(async (req, res, next) => {
         // Clean phone number (remove + and spaces)
         const cleanPhone = phone.replace(/\+/g, '').replace(/\s/g, '');
 
-        let user = await prisma.user.findUnique({ 
-            where: { phone: cleanPhone },
-            include: { expert: { select: { status: true } } }
-        });
-
-        let isNewUser = false;
-
-        if (!user) {
-            isNewUser = true;
-            // Create New User
-            user = await prisma.user.create({
-                data: {
-                    phone: cleanPhone,
-                    name: `soul ${cleanPhone.slice(-4)}`,
-                    role: 'USER',
-                    isActive: true,
-                    signupBonusUsed: false
-                }
-            });
-
-            // Create Wallet
-            await prisma.wallet.create({ data: { userId: user.id } });
-
-            // Dispatch Welcome Notification
-            await NotificationEngine.send({
-                userId: user.id,
-                title: 'welcome to novasathi!',
-                message: 'your journey into the sanctuary begins now. explore the cosmic flow.',
-                type: 'SYSTEM',
-            });
-        }
+        // Provision user via Centralized AuthService
+        const { user, isNewUser } = await AuthService.provisionUser(cleanPhone);
 
         const wallet = await prisma.wallet.findUnique({ where: { userId: user.id } });
 
         // Issue tokens via cookies
-        sendCookieResponse({
+        await sendCookieResponse({
             id: user.id,
             phone: user.phone,
             name: user.name,
             role: user.role,
             avatar: user.avatar,
+            expert: user.expert,
             isNewUser,
             serverStatus: user.expert?.status || (user.role === 'EXPERT' ? 'PENDING' : null),
         }, 200, res, 'Authenticated via Firebase successfully', {

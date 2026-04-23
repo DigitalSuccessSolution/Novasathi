@@ -85,14 +85,13 @@ exports.approveExpert = catchAsync(async (req, res, next) => {
     include: { user: { select: { phone: true } } },
   });
 
-  // Notify expert
-  await prisma.notification.create({
-    data: {
-      userId: expert.userId,
-      title: '✅ Application Approved',
-      message: 'Your expert profile has been approved! You can now start taking sessions.',
-      type: 'GENERAL',
-    },
+  // Notify expert via Notification Engine (handles DB + Socket + Push)
+  const NotificationEngine = require('../notification/notification.service');
+  await NotificationEngine.send({
+    userId: expert.userId,
+    title: '✅ Application Approved',
+    message: 'Your expert profile has been approved! You can now start taking sessions.',
+    type: 'GENERAL',
   });
 
   res.status(200).json(new ApiResponse(200, expert, 'Expert approved successfully'));
@@ -109,14 +108,13 @@ exports.rejectExpert = catchAsync(async (req, res, next) => {
     },
   });
 
-  // Notify expert
-  await prisma.notification.create({
-    data: {
-      userId: expert.userId,
-      title: '❌ Application Rejected',
-      message: `Your expert application has been rejected. Reason: ${reason || 'Does not meet criteria'}`,
-      type: 'GENERAL',
-    },
+  // Notify expert via Notification Engine (handles DB + Socket + Push)
+  const NotificationEngine = require('../notification/notification.service');
+  await NotificationEngine.send({
+    userId: expert.userId,
+    title: '❌ Application Rejected',
+    message: `Your expert application has been rejected. Reason: ${reason || 'Does not meet criteria'}`,
+    type: 'GENERAL',
   });
 
   res.status(200).json(new ApiResponse(200, expert, 'Expert application rejected'));
@@ -182,35 +180,6 @@ exports.createDailyContent = catchAsync(async (req, res) => {
   });
 
   res.status(201).json(new ApiResponse(201, newContent, 'Daily content published'));
-});
-
-/**
- * Update Admin Settings
- */
-exports.updateSettings = catchAsync(async (req, res) => {
-  const { 
-    platformCommissionPercent, freeMinutesSignup, freeMinutesDailySOS, 
-    minRechargeAmount, lowBalanceThreshold,
-    freeMinutesResetType, sosEnabled, studentZoneTitle 
-  } = req.body;
-
-  const updateData = {};
-  if (platformCommissionPercent !== undefined) updateData.platformCommissionPercent = parseFloat(platformCommissionPercent);
-  if (freeMinutesSignup !== undefined) updateData.freeMinutesSignup = parseInt(freeMinutesSignup);
-  if (freeMinutesDailySOS !== undefined) updateData.freeMinutesDailySOS = parseInt(freeMinutesDailySOS);
-  if (minRechargeAmount !== undefined) updateData.minRechargeAmount = parseFloat(minRechargeAmount);
-  if (lowBalanceThreshold !== undefined) updateData.lowBalanceThreshold = parseFloat(lowBalanceThreshold);
-  if (freeMinutesResetType !== undefined) updateData.freeMinutesResetType = freeMinutesResetType;
-  if (sosEnabled !== undefined) updateData.sosEnabled = sosEnabled;
-  if (studentZoneTitle !== undefined) updateData.studentZoneTitle = studentZoneTitle;
-
-  const settings = await prisma.adminSettings.upsert({
-    where: { id: 'global' },
-    update: updateData,
-    create: { id: 'global', ...updateData },
-  });
-
-  res.status(200).json(new ApiResponse(200, settings, 'Global settings updated'));
 });
 
 /**
@@ -594,13 +563,6 @@ exports.uploadEarlyBirdCSV = catchAsync(async (req, res, next) => {
   res.status(200).json(new ApiResponse(200, { added, skipped, total: phones.length }, 'Early Bird list updated'));
 });
 
-// ─────────────────────────────────────────────────────────────
-// SRS §9.4 — Expanded Admin Settings
-// ─────────────────────────────────────────────────────────────
-exports.getSettings = catchAsync(async (req, res) => {
-  const settings = await prisma.adminSettings.findUnique({ where: { id: 'global' } });
-  res.status(200).json(new ApiResponse(200, settings));
-});
 
 // ─────────────────────────────────────────────────────────────
 // SRS §9.3 — User LTV (Lifetime Value) Profile

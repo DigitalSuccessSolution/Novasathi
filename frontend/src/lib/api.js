@@ -1,30 +1,47 @@
-// src/lib/api.js
-const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5001/api/v1';
+import axios from 'axios';
+import { setToken, logout } from '../store/slices/authSlice';
 
-export const apiFetch = async (endpoint, options = {}) => {
-  const token = localStorage.getItem('token');
-  
-  const headers = {
-    'Content-Type': 'application/json',
-    ...(token && { Authorization: `Bearer ${token}` }),
-    ...options.headers,
-  };
+const api = axios.create({
+    baseURL: import.meta.env.VITE_API_BASE_URL,
+    timeout: 10000,
+    withCredentials: true,
+});
 
-  const response = await fetch(`${API_URL}${endpoint}`, {
-    ...options,
-    headers,
-  });
+export const setupInterceptors = (store) => {
+    api.interceptors.request.use(
+        (config) => {
+            const token = store.getState().auth.token;
+            if (token) {
+                config.headers.Authorization = `Bearer ${token}`;
+            }
+            return config;
+        },
+        (error) => Promise.reject(error)
+    );
 
-  const data = await response.json();
-
-  if (!response.ok) {
-    if (response.status === 401 && !window.location.pathname.includes('login')) {
-       // Optional: Handle token refresh logic here
-       localStorage.removeItem('token');
-       // window.location.href = '/login'; 
-    }
-    throw new Error(data.message || 'Something went wrong');
-  }
-
-  return data;
+    api.interceptors.response.use(
+        (response) => response,
+        async (error) => {
+            const originalRequest = error.config;
+            if (error.response?.status === 401 && !originalRequest._retry && !originalRequest.url.includes('/auth/')) {
+                originalRequest._retry = true;
+                try {
+                    const { data } = await api.post("/auth/refresh-token");
+                    const { token: newAccessToken } = data.data;
+                    
+                    store.dispatch(setToken(newAccessToken));
+                    
+                    // Retry original request
+                    originalRequest.headers.Authorization = `Bearer ${newAccessToken}`;
+                    return api(originalRequest);
+                } catch (refreshError) {
+                    store.dispatch(logout());
+                    return Promise.reject(refreshError);
+                }
+            }
+            return Promise.reject(error);
+        }
+    );
 };
+
+export default api;

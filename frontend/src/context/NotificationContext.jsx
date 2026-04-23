@@ -1,106 +1,84 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useEffect, useCallback, useMemo } from 'react';
+import { useSelector, useDispatch } from 'react-redux';
 import { useAuth } from './AuthContext';
 import socket from '../lib/socket';
+import { 
+  fetchUnreadCount, 
+  fetchNotifications as thunkFetchNotifications, 
+  markAsRead as thunkMarkAsRead, 
+  markAllRead as thunkMarkAllRead, 
+  deleteNotification as thunkDeleteNotification 
+} from '../store/thunks/notificationThunks';
+import { setUnreadCount, setNotifications } from '../store/slices/notificationSlice';
 
 const NotificationContext = createContext();
 
 export const NotificationProvider = ({ children }) => {
-  const { api, token, user } = useAuth();
-  const [notifications, setNotifications] = useState([]);
-  const [unreadCount, setUnreadCount] = useState(0);
-  const [loading, setLoading] = useState(false);
-
-  const fetchUnreadCount = useCallback(async () => {
-    if (!token) return;
-    try {
-      const res = await api.get('/notifications/unread-count');
-      setUnreadCount(res.data.data.count || 0);
-    } catch (err) {
-      console.error("🔔 [UNREAD_COUNT_ERROR]", err);
-    }
-  }, [api, token]);
-
-  const fetchNotifications = async (page = 1, limit = 10) => {
-    if (!token) return;
-    try {
-      setLoading(true);
-      const res = await api.get(`/notifications?page=${page}&limit=${limit}`);
-      const { notifications: list, unreadCount: count } = res.data.data;
-      setNotifications(list);
-      setUnreadCount(count);
-      return res.data.data;
-    } catch (err) {
-      console.error("🔔 [FETCH_NOTIFICATIONS_ERROR]", err);
-      return { notifications: [], unreadCount: 0 };
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const markAsRead = async (id) => {
-    try {
-      await api.patch(`/notifications/${id}/read`);
-      setUnreadCount(prev => Math.max(0, prev - 1));
-      setNotifications(prev => prev.map(n => n.id === id ? { ...n, isRead: true } : n));
-    } catch (err) {
-      console.error("🔔 [MARK_READ_ERROR]", err);
-    }
-  };
-
-  const markAllRead = async () => {
-    try {
-      await api.patch('/notifications/read-all');
-      setUnreadCount(0);
-      setNotifications(prev => prev.map(n => ({ ...n, isRead: true })));
-    } catch (err) {
-      console.error("🔔 [MARK_ALL_READ_ERROR]", err);
-    }
-  };
-
-  const deleteNotification = async (id) => {
-    try {
-      await api.delete(`/notifications/${id}`);
-      setNotifications(prev => prev.filter(n => n.id !== id));
-      fetchUnreadCount();
-    } catch (err) {
-      console.error("🔔 [DELETE_NOTIFICATION_ERROR]", err);
-    }
-  };
+  const dispatch = useDispatch();
+  const { token } = useAuth();
 
   useEffect(() => {
     if (token) {
-      fetchUnreadCount();
+      dispatch(fetchUnreadCount());
       
+      const handleNewNotification = () => {
+        dispatch(fetchUnreadCount());
+      };
+
       // Real-time synchronization
-      socket.on('new_notification', fetchUnreadCount);
+      socket.on('new_notification', handleNewNotification);
       
       return () => {
-        socket.off('new_notification', fetchUnreadCount);
+        socket.off('new_notification', handleNewNotification);
       };
     } else {
-      setUnreadCount(0);
-      setNotifications([]);
+      dispatch(setUnreadCount(0));
+      dispatch(setNotifications([]));
     }
-  }, [token]);
+  }, [token, dispatch]);
 
   return (
-    <NotificationContext.Provider value={{
-      notifications,
-      unreadCount,
-      loading,
-      fetchNotifications,
-      markAsRead,
-      markAllRead,
-      deleteNotification,
-      refreshCount: fetchUnreadCount
-    }}>
+    <NotificationContext.Provider value={{}}>
       {children}
     </NotificationContext.Provider>
   );
 };
 
 export const useNotifications = () => {
-  const context = useContext(NotificationContext);
-  if (!context) throw new Error("useNotifications must be used within NotificationProvider");
-  return context;
+  const dispatch = useDispatch();
+  const { notifications, unreadCount, loading } = useSelector(state => state.notification);
+
+  const fetchNotifications = useCallback(async (page = 1, limit = 10) => {
+    return dispatch(thunkFetchNotifications({ page, limit })).unwrap();
+  }, [dispatch]);
+
+  const markAsRead = useCallback(async (id) => {
+    return dispatch(thunkMarkAsRead(id)).unwrap();
+  }, [dispatch]);
+
+  const markAllRead = useCallback(async () => {
+    return dispatch(thunkMarkAllRead()).unwrap();
+  }, [dispatch]);
+
+  const deleteNotification = useCallback(async (id) => {
+    return dispatch(thunkDeleteNotification(id)).unwrap();
+  }, [dispatch]);
+
+  const refreshCount = useCallback(() => {
+    dispatch(fetchUnreadCount());
+  }, [dispatch]);
+
+  return useMemo(() => ({
+    notifications,
+    unreadCount,
+    loading,
+    fetchNotifications,
+    markAsRead,
+    markAllRead,
+    deleteNotification,
+    refreshCount
+  }), [
+    notifications, unreadCount, loading,
+    fetchNotifications, markAsRead, markAllRead, deleteNotification, refreshCount
+  ]);
 };

@@ -9,6 +9,7 @@ router.post('/intake', chatController.submitIntake);
 router.post('/start', chatController.startSession);
 router.get('/session/:sessionId', chatController.getSession);
 router.post('/session/:sessionId/end', chatController.endSession);
+router.post('/session/:sessionId/accept', chatController.acceptSession);
 router.get('/session/:sessionId/messages', chatController.getMessages);
 router.post('/session/:sessionId/clear', chatController.clearChat);
 router.patch('/session/:sessionId/privacy', chatController.updatePrivacy);

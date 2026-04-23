@@ -1,12 +1,16 @@
 import React, { useRef, useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Phone, PhoneOff } from 'lucide-react';
+import { Phone, PhoneOff, MessageSquare, Video } from 'lucide-react';
 import { useCall } from '../context/CallContext';
+import { useAuth } from '../context/AuthContext';
 import VoiceCallOverlay from './VoiceCallOverlay';
 import VideoCallOverlay from './VideoCallOverlay';
 import CallBanner from './CallBanner';
+import { formatTime } from '../utils/formatTime';
 
 const CallManager = () => {
+  const { user } = useAuth();
   const {
     localStream,
     remoteStream,
@@ -19,6 +23,8 @@ const CallManager = () => {
     isVideoOff,
     isMinimized,
     partnerInfo,
+    partnerMuted,
+    partnerVideoOff,
     respondToCall,
     endCall,
     toggleMute,
@@ -26,17 +32,17 @@ const CallManager = () => {
     setIsMinimized,
     connectionState
   } = useCall();
+  const location = useLocation();
+  const isExpertPage = location.pathname.startsWith('/expert-panel');
+
+  useEffect(() => {
+    console.log("🛡️ [CALL_MANAGER] State Update:", { callActive, callType, isMinimized, isCalling, incomingCall: !!incomingCall });
+  }, [callActive, callType, isMinimized, isCalling, incomingCall]);
 
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
 
-  // Format time (re-implemented here for standalone use)
-  const formatTime = (seconds) => {
-    if (seconds === null || seconds === undefined) return "--:--";
-    const mins = Math.floor((seconds % 3600) / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-  };
+
 
   useEffect(() => {
     if (callActive && callType === 'video' && localStream && localVideoRef.current) {
@@ -52,8 +58,8 @@ const CallManager = () => {
     <CallBanner />
     
     <AnimatePresence>
-      {/* Active Overlays */}
-      {callActive && !isMinimized && callType === 'voice' && (
+      {/* Active Voice Call Overlay */}
+      {callActive && !isMinimized && (callType === 'voice' || callType === 'call') && (
         <VoiceCallOverlay 
             partner={partnerInfo}
             status="In Session"
@@ -65,6 +71,9 @@ const CallManager = () => {
             remoteStream={remoteStream}
             setIsMinimized={setIsMinimized}
             connectionState={connectionState}
+            userRole={user?.role}
+            isExpertPage={isExpertPage}
+            partnerMuted={partnerMuted}
         />
       )}
 
@@ -84,6 +93,10 @@ const CallManager = () => {
             remoteStream={remoteStream}
             setIsMinimized={setIsMinimized}
             connectionState={connectionState}
+            userRole={user?.role}
+            isExpertPage={isExpertPage}
+            partnerMuted={partnerMuted}
+            partnerVideoOff={partnerVideoOff}
         />
       )}
 
@@ -93,21 +106,9 @@ const CallManager = () => {
           initial={{ opacity: 0, scale: 0.9 }}
           animate={{ opacity: 1, scale: 1 }}
           exit={{ opacity: 0, scale: 0.9 }}
-          className="fixed inset-0 z-[9999] bg-[#0b0d1a] flex flex-col items-center justify-center p-6"
+          className="fixed inset-0 z-[9999] bg-[#0b0d1a]/80 backdrop-blur-3xl flex flex-col items-center justify-center p-6"
         >
-          {/* Audio Ringtone Support */}
-          <audio 
-            autoPlay 
-            loop 
-            src="https://assets.mixkit.co/active_storage/sfx/1359/1359-preview.mp3" 
-            ref={(el) => {
-                if (el) {
-                    el.volume = 0.5;
-                    if (incomingCall && !callActive) el.play().catch(() => {});
-                    else el.pause();
-                }
-            }}
-          />
+          {/* Removed duplicate audio tag - controlled by CallContext */}
 
           <div className="absolute inset-0 z-0 overflow-hidden">
               <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-[600px] h-[600px] bg-purple-600/10 blur-[130px] rounded-full animate-pulse" />
@@ -140,7 +141,7 @@ const CallManager = () => {
               
               <h2 className="text-4xl font-semibold mb-3 tracking-tight">{partnerInfo.name}</h2>
               <p className="text-purple-400 font-semibold  tracking-[0.5em] text-[12px] animate-pulse">
-                  {isCalling ? `Initiating Ritual...` : `Incoming ${callType} Consultation`}
+                  {isCalling ? `Initiating Ritual...` : `Incoming ${callType.toUpperCase()} Ritual`}
               </p>
 
               {partnerInfo.intakeData?.concern && !isCalling && (
@@ -164,7 +165,9 @@ const CallManager = () => {
                         onClick={() => respondToCall(true)}
                         className="w-24 h-24 bg-emerald-500 text-white rounded-full flex items-center justify-center shadow-2xl shadow-emerald-500/50 hover:bg-emerald-400 transition-colors"
                       >
-                        <Phone size={36} fill="white" className="animate-bounce" />
+                        {callType === 'chat' ? <MessageSquare size={36} fill="white" className="animate-bounce" /> : 
+                         callType === 'video' ? <Video size={36} fill="white" className="animate-bounce" /> :
+                         <Phone size={36} fill="white" className="animate-bounce" />}
                       </motion.button>
                   )}
                   

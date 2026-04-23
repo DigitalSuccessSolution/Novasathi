@@ -16,14 +16,20 @@ import {
 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import { useChat } from "../context/ChatContext";
+import { useCall } from "../context/CallContext";
 import { motion, AnimatePresence } from "framer-motion";
 import { useNavigate } from "react-router-dom";
 
-const ExpertLayout = ({ children }) => {
+const ExpertLayout = ({ children, noPadding = false }) => {
     const location = useLocation();
     const navigate = useNavigate();
     const { logout, user } = useAuth();
+    const { pendingRitualRequest, acceptRitual } = useChat();
+    const { incomingCall, respondToCall, callType, callActive, isMinimized } = useCall();
     const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+
+    const isRinging = incomingCall || pendingRitualRequest;
+
 
     const isApproved = user?.serverStatus === 'APPROVED';
 
@@ -38,17 +44,55 @@ const ExpertLayout = ({ children }) => {
 
     const handleLogout = () => {
         logout();
-        window.location.href = "/login";
+        window.location.href = "/";
     };
 
     // Only hide navigation when INSIDE a specific chat session (e.g. /chat/UUID)
     // Avoid hiding on dashboard routes or the sessions list
-    const isChatting = location.pathname.startsWith("/chat/") && location.pathname !== "/chat/active";
+    const isFocused = (location.pathname.startsWith("/chat/") || location.pathname.startsWith("/expert-panel/chat/")) && location.pathname !== "/chat/active";
+    const hideNavigation = isFocused || (callActive && !isMinimized);
 
     return (
-        <div className="h-screen bg-[#06070f] text-white font-sans antialiased flex overflow-hidden">
-            {/* Desktop Sidebar */}
-            <aside className={`${isChatting ? 'hidden' : 'hidden lg:flex'} w-72 flex-col bg-white/[0.02] border-r border-white/5 backdrop-blur-3xl shrink-0`}>
+        <div className="h-screen bg-[#06070f] text-white font-sans antialiased flex flex-col overflow-hidden">
+            {/* Persistent Ritual Alert Bar */}
+            <AnimatePresence>
+                {isRinging && (
+                    <motion.div 
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: 'auto', opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        className="bg-gradient-to-r from-purple-600 via-pink-600 to-red-600 px-6 py-3 flex items-center justify-between shadow-[0_0_30px_rgba(219,39,119,0.3)] relative z-[100]"
+                    >
+                        <div className="flex items-center gap-4">
+                            <div className="w-10 h-10 bg-white/20 rounded-full flex items-center justify-center animate-pulse border border-white/30">
+                                <Sparkles size={20} className="text-white" />
+                            </div>
+                            <div>
+                                <h4 className="text-white font-bold text-xs uppercase tracking-widest">Incoming {callType?.toUpperCase() || 'CHAT'} Ritual</h4>
+                                <p className="text-[10px] text-white/80 font-medium">Guidance requested • Respond immediately</p>
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                            <button 
+                                onClick={() => respondToCall(false)}
+                                className="px-4 py-2 bg-black/20 hover:bg-black/40 text-white rounded-xl text-[10px] font-bold transition-all border border-white/10"
+                            >
+                                Decline
+                            </button>
+                            <button 
+                                onClick={() => respondToCall(true)}
+                                className="px-6 py-2 bg-white text-purple-600 hover:bg-purple-50 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all shadow-xl active:scale-95"
+                            >
+                                Accept Guidance
+                            </button>
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            <div className="flex-1 flex overflow-hidden">
+                {/* Desktop Sidebar */}
+                <aside className={`${hideNavigation ? 'hidden' : 'hidden lg:flex'} w-72 flex-col bg-white/[0.02] border-r border-white/5 backdrop-blur-3xl shrink-0 relative z-[50]`}>
                 <div className="p-8">
                     <div className="flex items-center gap-3 mb-10">
                         <div className="w-10 h-10 rounded-2xl bg-emerald-500/10 flex items-center justify-center border border-emerald-500/20">
@@ -104,7 +148,7 @@ const ExpertLayout = ({ children }) => {
             </aside>
 
             {/* Mobile Header */}
-            {!isChatting && (
+            {!hideNavigation && (
                 <div className="lg:hidden fixed top-0 left-0 w-full h-20 bg-black/80 backdrop-blur-3xl border-b border-white/5 z-40 flex items-center justify-between px-6">
                     <div className="flex items-center gap-3">
                         <Sparkles size={20} className="text-emerald-400" />
@@ -153,7 +197,7 @@ const ExpertLayout = ({ children }) => {
 
             {/* Main Content */}
             <main className="flex-1 overflow-y-auto scroll-smooth pt-20 lg:pt-0">
-                <div className="container mx-auto max-w-screen-2xl p-6 lg:p-12 pb-32">
+                <div className={noPadding ? "h-full w-full" : "container mx-auto max-w-screen-2xl p-6 lg:p-12 pb-32"}>
                     {children}
                 </div>
             </main>
@@ -182,8 +226,8 @@ const ExpertLayout = ({ children }) => {
                     <span className="text-[8px] font-sans font-semibold tracking-widest opacity-60 uppercase">More</span>
                 </button>
             </nav>
-
         </div>
+    </div>
     );
 };
 

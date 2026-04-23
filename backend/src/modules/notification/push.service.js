@@ -16,10 +16,13 @@ class PushService {
         const message = {
             token: token,
             notification: {
-                title: payload.title,
-                body: payload.body,
+                title: payload.title || 'NovaSathi',
+                body: payload.body || '',
             },
-            data: payload.data || {},
+            // FCM requires all data values to be strings
+            data: Object.fromEntries(
+                Object.entries(payload.data || {}).map(([k, v]) => [k, String(v)])
+            ),
             android: {
                 priority: 'high',
                 notification: {

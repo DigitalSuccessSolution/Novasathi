@@ -12,13 +12,16 @@ exports.getMe = catchAsync(async (req, res) => {
     include: {
       wallet: { select: { id: true, balance: true, totalRecharged: true, totalSpent: true } },
       favorites: { include: { expert: { include: { user: { select: { name: true, avatar: true } } } } } },
-      expert: { select: { status: true } }
+      expert: { select: { id: true, status: true, displayName: true, profileImage: true } }
     },
   });
 
   // Map expert status to serverStatus for easy frontend access
   if (user && user.expert) {
     user.serverStatus = user.expert.status;
+    // Also attach professional details to the top level for convenience in layouts
+    user.displayName = user.expert.displayName;
+    user.profileImage = user.expert.profileImage;
   }
 
   res.status(200).json(new ApiResponse(200, user));
@@ -93,8 +96,8 @@ exports.getChatHistory = catchAsync(async (req, res) => {
   const formatted = sessions.map(s => ({
     ...s,
     messages: s.isLocked ? [{ content: '🔒 Unlock to view this conversation', createdAt: s.endedAt }] : s.messages,
-    partnerName: s.expert?.user?.name || s.counselor?.user?.name || 'Unknown',
-    partnerAvatar: s.expert?.user?.avatar || s.counselor?.user?.avatar || null,
+    partnerName: s.expert?.displayName || s.expert?.user?.name || s.counselor?.displayName || s.counselor?.user?.name || 'Unknown',
+    partnerAvatar: s.expert?.profileImage || s.expert?.user?.avatar || s.counselor?.user?.avatar || null,
   }));
 
   res.status(200).json(new ApiResponse(200, formatted));

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { 
   ArrowLeft, Send, Phone, Video, MoreVertical, Info, Sparkles,
@@ -11,6 +11,142 @@ import { useCall } from '../context/CallContext';
 import { useAuth } from '../context/AuthContext';
 import { useChat } from '../context/ChatContext';
 import socket from '../lib/socket';
+
+// ─── Sub-Components ───
+
+const ChatMessage = React.memo(({ msg, isOwn, onHeart, formatTime }) => {
+  return (
+    <motion.div 
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      className={`flex ${isOwn ? 'justify-end' : 'justify-start'} group mb-4`}
+      onDoubleClick={() => onHeart(msg.id)}
+    >
+      <div className="relative max-w-[85%] md:max-w-[70%]">
+        <div className={`rounded-2xl px-5 py-3.5 transition-all duration-300 shadow-xl ${
+          isOwn 
+            ? 'bg-gradient-to-br from-purple-600 to-indigo-700 text-white rounded-br-none shadow-purple-900/10' 
+            : 'bg-[#1a1c2e] border border-white/10 text-gray-200 rounded-bl-none shadow-black/20'
+        } ${msg.reaction ? 'ring-2 ring-pink-500/30 mb-2' : ''}`}>
+          {msg.isFiltered ? (
+            <div className="flex items-center gap-2 py-1 italic opacity-50">
+              <EyeOff size={14} />
+              <span className="text-xs">Message hidden for security</span>
+            </div>
+          ) : (
+            <p className="text-[15px] leading-relaxed break-words whitespace-pre-wrap font-medium">{msg.content}</p>
+          )}
+          
+          <div className="flex items-center justify-between mt-2 pt-1 border-t border-white/5">
+            <p className={`text-[10px] font-bold uppercase tracking-wider opacity-40`}>
+               {new Date(msg.createdAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true })}
+            </p>
+            {isOwn && (
+              <div className="flex items-center gap-1">
+                {msg.isOptimistic ? (
+                  <Clock size={10} className="text-white/40 animate-pulse" />
+                ) : msg.isRead ? (
+                  <CheckCheck size={14} className="text-sky-300" />
+                ) : (
+                  <Check size={14} className="opacity-30" />
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+        
+        {msg.reaction && (
+          <motion.div 
+            initial={{ scale: 0, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            className={`absolute -bottom-3 ${isOwn ? 'right-2' : 'left-2'}`}
+          >
+            <div className="bg-pink-600 rounded-full py-1 px-2 border-2 border-[#1a1c2e] shadow-xl text-[12px] flex items-center justify-center">
+              {msg.reaction}
+            </div>
+          </motion.div>
+        )}
+      </div>
+    </motion.div>
+  );
+});
+
+const IntakeOverlay = ({ show, data }) => (
+  <AnimatePresence>
+    {show && data && (
+      <motion.div 
+        initial={{ height: 0, opacity: 0 }}
+        animate={{ height: 'auto', opacity: 1 }}
+        exit={{ height: 0, opacity: 0 }}
+        className="bg-[#0c0d1b]/95 border-b border-white/5 overflow-hidden backdrop-blur-xl shadow-2xl relative z-20"
+      >
+        <div className="max-w-6xl mx-auto p-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+            <div className="space-y-4">
+              <div className="flex items-center gap-2 mb-2">
+                  <div className="w-1.5 h-4 bg-emerald-500 rounded-full" />
+                  <h3 className="text-[12px] font-bold text-white uppercase tracking-widest">Seeker Profile</h3>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                  <div className="bg-white/5 p-3 rounded-xl border border-white/5">
+                      <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-1">Name</p>
+                      <p className="text-sm font-medium text-emerald-400">{data.name}</p>
+                  </div>
+                  <div className="bg-white/5 p-3 rounded-xl border border-white/5">
+                      <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-1">Birth Details</p>
+                      <p className="text-sm font-medium text-white">
+                          {data.dob} {data.tob && `@ ${data.tob}`}
+                      </p>
+                  </div>
+                  <div className="bg-white/5 p-3 rounded-xl border border-white/5">
+                      <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-1">Gender</p>
+                      <p className="text-sm font-medium text-white">{data.gender}</p>
+                  </div>
+                  <div className="bg-white/5 p-3 rounded-xl border border-white/5">
+                      <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-1">Place</p>
+                      <p className="text-sm font-medium text-white">{data.city}</p>
+                  </div>
+                  <div className="bg-white/5 p-3 rounded-xl border border-white/5 col-span-2">
+                      <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-1">Primary Concern</p>
+                      <p className="text-sm font-medium text-indigo-300 italic">"{data.concern}"</p>
+                  </div>
+              </div>
+            </div>
+
+            {data.partnerName && (
+              <div className="space-y-4">
+                  <div className="flex items-center gap-2 mb-2">
+                      <div className="w-1.5 h-4 bg-purple-500 rounded-full" />
+                      <h3 className="text-[12px] font-bold text-white uppercase tracking-widest">Partner Profile</h3>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                      <div className="bg-white/5 p-3 rounded-xl border border-white/5">
+                          <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-1">Partner Name</p>
+                          <p className="text-sm font-medium text-purple-400">{data.partnerName}</p>
+                      </div>
+                      <div className="bg-white/5 p-3 rounded-xl border border-white/5">
+                          <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-1">Birth Details</p>
+                          <p className="text-sm font-medium text-white">
+                              {data.partnerDob} {data.partnerTob && `@ ${data.partnerTob}`}
+                          </p>
+                      </div>
+                      <div className="bg-white/5 p-3 rounded-xl border border-white/5">
+                          <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-1">Gender</p>
+                          <p className="text-sm font-medium text-white">{data.partnerGender}</p>
+                      </div>
+                      <div className="bg-white/5 p-3 rounded-xl border border-white/5">
+                          <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-1">Place</p>
+                          <p className="text-sm font-medium text-white">{data.partnerCity || 'Not specified'}</p>
+                      </div>
+                  </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </motion.div>
+    )}
+  </AnimatePresence>
+);
 
 const ChatScreen = () => {
   const { id } = useParams();
@@ -42,23 +178,23 @@ const ChatScreen = () => {
   const messagesEndRef = useRef(null);
 
   const statusRef = useRef(null);
+  const sessionRef = useRef(null);
   const isLoading = initLoading || chatLoading;
 
-  // ─── Sync Status for Auto-End Cleanup ───
+  // ─── Sync Status for Auto-End Cleanup & Socket Handlers ───
   useEffect(() => {
     statusRef.current = currentSession?.status;
-  }, [currentSession?.status]);
+    sessionRef.current = currentSession;
+  }, [currentSession]);
 
-  // ─── Auto-End Session on Unmount (Leaving Screen) ───
+  // ─── Leave Room on Unmount (Triggers 45s backend timeout) ───
   useEffect(() => {
     return () => {
-      if (resolvedId && (statusRef.current === 'ACTIVE' || statusRef.current === 'WAITING')) {
-        // Use a fire-and-forget API call and socket emit to ensure the session ends
-        api.post(`/chat/session/${resolvedId}/end`).catch(() => {});
-        socket.emit('end_session', { sessionId: resolvedId });
+      if (resolvedId) {
+        socket.emit('leave_chat', { sessionId: resolvedId });
       }
     };
-  }, [resolvedId, api]);
+  }, [resolvedId]);
 
   // ─── Timer for Elapsed Duration ───
   useEffect(() => {
@@ -82,7 +218,7 @@ const ChatScreen = () => {
 
   // ─── Initialize Chat Session ───
   useEffect(() => {
-    setTimeLeft(null); // Reset immediately on ID change
+    setTimeLeft(null); 
     setLiveBalance(0);
     setSessionEarnings(0);
 
@@ -99,7 +235,13 @@ const ChatScreen = () => {
         window.history.replaceState(null, '', `/chat/${targetId}`);
       }
 
-      if (!targetId || (currentSession?.id === targetId && messages.length > 0)) {
+      if (!targetId) {
+        setInitLoading(false);
+        return;
+      }
+
+      // Avoid re-initialization if same ID
+      if (sessionRef.current?.id === targetId && messages.length > 0) {
         setInitLoading(false);
         return;
       }
@@ -118,43 +260,44 @@ const ChatScreen = () => {
           setLiveBalance(sessData.walletBalance || user.wallet?.balance || 0);
         }
 
-        // Initialize timer for active sessions immediately
         if (sessData.status === 'ACTIVE') {
           const now = new Date();
           const startedAt = sessData.startedAt || sessData.createdAt;
           const elapsed = Math.floor((now - new Date(startedAt)) / 1000);
           
           if (sessData.isFreeSession) {
-            // Free sessions are 10 min (600s)
             setTimeLeft(Math.max(0, 600 - elapsed));
           } else if (user.role === 'USER' && sessData.pricePerMinute > 0) {
-            // Paid sessions based on balance
             const bal = sessData.walletBalance || user.wallet?.balance || 0;
             const totalAvailable = Math.floor((bal / sessData.pricePerMinute) * 60);
             setTimeLeft(Math.max(0, totalAvailable - elapsed));
           }
         }
 
-        // Auto-call logic
+        // Auto-call logic (only once per session mount)
         const params = new URLSearchParams(location.search);
-        const autoCall = params.get('autoCall');
-        const ritualType = params.get('type');
-
-        if (autoCall === 'true' && ritualType && !autoCallStarted && !callActive) {
+        if (params.get('autoCall') === 'true' && !autoCallStarted && !callActive) {
           setAutoCallStarted(true);
-          const partnerInfo = {
-            name: sessData.expert?.displayName || sessData.counselor?.displayName || "Partner",
-            avatar: sessData.expert?.profileImage || null
+          const rType = params.get('type') === 'video' ? 'video' : 'voice';
+          
+          // Use the actual partner info computed below if possible, 
+          // but since this effect runs earlier, we ensure sessData is fresh.
+          const expert = sessData.expert || sessData.counselor;
+          const pInfo = {
+            name: expert?.displayName || expert?.user?.name || sessData.expert?.displayName || sessData.counselor?.displayName || "Expert",
+            avatar: expert?.profileImage || expert?.user?.avatar || null
           };
-          setTimeout(() => initiateCall(targetId, ritualType === 'video' ? 'video' : 'voice', partnerInfo), 2000);
+          setTimeout(() => initiateCall(targetId, rType, pInfo), 2000);
         }
       } catch (err) {
         console.error("❌ [CHAT_INIT_ERROR]", err);
+      } finally {
+        setInitLoading(false);
       }
-      setInitLoading(false);
     };
 
     initializeChat();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, token, user?.id]);
 
   // ─── Socket listeners for this page ───
@@ -162,14 +305,32 @@ const ChatScreen = () => {
     if (!resolvedId) return;
 
     const handleBalance = (data) => {
-      if (data.newBalance !== undefined && user?.role === 'USER') {
+      if (user?.role === 'USER' && data.newBalance !== undefined) {
         setLiveBalance(data.newBalance);
         updateWalletBalance(data.newBalance);
       }
+      
       if (user?.role === 'EXPERT') {
-        setSessionEarnings(prev => prev + (currentSession?.pricePerMinute || 0));
+        // Update session-specific earnings
+        setSessionEarnings(prev => prev + (sessionRef.current?.pricePerMinute || 0));
+        
+        // Update global wallet balance if provided
+        if (data.expertBalance !== undefined) {
+           updateWalletBalance(data.expertBalance);
+        }
       }
+      
       if (data.timeLeftSeconds !== undefined) setTimeLeft(data.timeLeftSeconds);
+    };
+
+    const handleEarnings = (data) => {
+      if (user?.role === 'EXPERT') {
+        console.log("💰 [EARNINGS_REALTIME] Credit received:", data.amount);
+        // data.newTotalBalance is the expert's total wallet balance
+        if (data.newTotalBalance !== undefined) {
+          updateWalletBalance(data.newTotalBalance);
+        }
+      }
     };
 
     const handleStarted = (data) => {
@@ -179,6 +340,8 @@ const ChatScreen = () => {
 
     const handleEnded = (data) => {
       setCurrentSession(prev => prev ? { ...prev, status: 'COMPLETED' } : prev);
+      alert("This ritual has been completed.");
+      navigate(user?.role === 'EXPERT' ? '/expert-panel' : '/dashboard');
     };
 
     const handleForce = (data) => {
@@ -191,64 +354,41 @@ const ChatScreen = () => {
     };
 
     socket.on('balance_update', handleBalance);
+    socket.on('earnings_update', handleEarnings);
     socket.on('session_started', handleStarted);
     socket.on('session_ended', handleEnded);
     socket.on('force_disconnect', handleForce);
     socket.on('typing_status', handleTyping);
+    socket.on('partner_disconnected', (data) => {
+      console.warn("Partner disconnected:", data);
+      // Optional: show a toast or status indicator
+    });
 
     return () => {
       socket.off('balance_update', handleBalance);
+      socket.off('earnings_update', handleEarnings);
       socket.off('session_started', handleStarted);
       socket.off('session_ended', handleEnded);
       socket.off('force_disconnect', handleForce);
       socket.off('typing_status', handleTyping);
     };
-  }, [resolvedId, user?.role, currentSession?.pricePerMinute]);
+  }, [resolvedId, user?.role, updateWalletBalance, navigate]);
 
   // ─── Timer countdown ───
   useEffect(() => {
     let timer;
-    if (timeLeft !== null && timeLeft > 0) {
-      timer = setInterval(() => setTimeLeft(prev => (prev > 0 ? prev - 1 : 0)), 1000);
+    if (currentSession?.status === 'ACTIVE') {
+      timer = setInterval(() => {
+        setTimeLeft(prev => {
+          if (prev === null || prev <= 0) return 0;
+          return prev - 1;
+        });
+      }, 1000);
     }
     return () => clearInterval(timer);
-  }, [timeLeft]);
+  }, [currentSession?.status]);
 
-  // ─── Handlers ───
-  const handleSend = () => {
-    if (!message.trim() || !resolvedId) return;
-    const overrideSenderId = (user?.role === 'ADMIN' && sendAsExpert) 
-      ? (currentSession?.expert?.user?.id || currentSession?.expert?.userId) 
-      : null;
-    sendMessage(resolvedId, message.trim(), 'TEXT', overrideSenderId);
-    setMessage("");
-  };
-
-  const handleCallInitiate = async (type) => {
-    if (['COMPLETED', 'CANCELLED', 'TERMINATED'].includes(currentSession?.status)) {
-      alert("This session has ended.");
-      return;
-    }
-    try {
-      await initiateCall(resolvedId, type, getPartnerInfo());
-    } catch (err) { /* handled in context */ }
-  };
-
-  const handleEndSession = async () => {
-    if (!window.confirm("Are you sure you want to end this conversation?")) return;
-    try {
-      await api.post(`/chat/session/${resolvedId}/end`);
-      setCurrentSession(prev => ({ ...prev, status: 'COMPLETED' }));
-      navigate(user?.role === 'EXPERT' ? '/expert-panel' : '/dashboard');
-    } catch (err) {
-      console.error("❌ [END_SESSION_ERROR]", err);
-      alert("Failed to end session properly.");
-    }
-  };
-
-  const handleHeart = (msgId) => reactToMessage(msgId, '❤️');
-
-  const getPartnerInfo = () => {
+  const partner = useMemo(() => {
     if (!currentSession) return { name: "Loading...", avatar: null };
     
     if (user?.role === 'ADMIN') {
@@ -260,39 +400,94 @@ const ChatScreen = () => {
 
     const isSeeker = user?.id === currentSession.userId;
     let otherParty = null;
-    let fallbackAvatar = null;
+    let displayName = null;
+    let profileImage = null;
 
     if (isSeeker) {
-      otherParty = currentSession.expert?.user || currentSession.counselor?.user;
-      fallbackAvatar = currentSession.expert?.profileImage;
+      // For seeker, the partner is the expert or counselor
+      const expert = currentSession.expert || currentSession.counselor;
+      otherParty = expert?.user;
+      
+      // Highly resilient name extraction
+      displayName = expert?.displayName || 
+                    expert?.user?.name || 
+                    otherParty?.name || 
+                    currentSession.expert?.displayName || 
+                    currentSession.counselor?.displayName ||
+                    "Expert";
+      
+      profileImage = expert?.profileImage || 
+                     expert?.user?.avatar || 
+                     otherParty?.avatar || 
+                     null;
     } else {
+      // For expert, the partner is the user
       otherParty = currentSession.user;
+      const showAnonymous = currentSession.isAnonymous;
+      displayName = showAnonymous ? "Anonymous User" : (otherParty?.name || "User");
+      profileImage = showAnonymous ? null : otherParty?.avatar;
     }
     
-    const showAnonymous = currentSession.isAnonymous && !isSeeker;
-    
-    let avatarUrl = otherParty?.avatar || fallbackAvatar;
+    let avatarUrl = profileImage;
     if (avatarUrl && !avatarUrl.startsWith('http')) {
       const baseUrl = (import.meta.env.VITE_API_BASE_URL || '').split('/api')[0];
       avatarUrl = `${baseUrl}/${avatarUrl}`;
     }
 
     return {
-      name: showAnonymous ? "Anonymous User" : (otherParty?.name || currentSession.expert?.displayName || "Partner"),
-      avatar: showAnonymous ? null : avatarUrl
+      name: displayName,
+      avatar: avatarUrl
     };
-  };
+  }, [currentSession, user?.role, user?.id]);
 
-  const formatTime = (seconds) => {
+  const formatTime = useCallback((seconds) => {
     if (seconds === null || seconds === undefined) return "--:--";
     const hrs = Math.floor(seconds / 3600);
     const mins = Math.floor((seconds % 3600) / 60);
     const secs = seconds % 60;
     if (hrs > 0) return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
     return `${mins}:${secs.toString().padStart(2, '0')}`;
-  };
+  }, []);
 
-  const partner = getPartnerInfo();
+  // ─── Handlers ───
+  const handleSend = useCallback(() => {
+    if (!message.trim() || !resolvedId) return;
+    const overrideSenderId = (user?.role === 'ADMIN' && sendAsExpert) 
+      ? (currentSession?.expert?.user?.id || currentSession?.expert?.userId) 
+      : null;
+    sendMessage(resolvedId, message.trim(), 'TEXT', overrideSenderId);
+    setMessage("");
+  }, [message, resolvedId, user?.role, sendAsExpert, currentSession, sendMessage]);
+
+  const handleCallInitiate = useCallback(async (type) => {
+    if (['COMPLETED', 'CANCELLED', 'TERMINATED'].includes(currentSession?.status)) {
+      alert("This session has ended.");
+      return;
+    }
+    try {
+      await initiateCall(resolvedId, type, partner);
+    } catch (err) { /* handled in context */ }
+  }, [currentSession?.status, resolvedId, initiateCall, partner]);
+
+  const handleEndSession = useCallback(async () => {
+    if (!window.confirm("Are you sure you want to end this conversation?")) return;
+    try {
+      // 1. Inform socket room immediately (Reduces latency for other side)
+      socket.emit('end_session', { sessionId: resolvedId });
+      
+      // 2. Finalize in DB
+      await api.post(`/chat/session/${resolvedId}/end`);
+      
+      setCurrentSession(prev => ({ ...prev, status: 'COMPLETED' }));
+      navigate(user?.role === 'EXPERT' ? '/expert-panel' : '/dashboard');
+    } catch (err) {
+      console.error("❌ [END_SESSION_ERROR]", err);
+      // Even if API fails, the socket emit likely worked or the session is already ending
+      navigate(user?.role === 'EXPERT' ? '/expert-panel' : '/dashboard');
+    }
+  }, [api, resolvedId, navigate, user?.role]);
+
+  const handleHeart = useCallback((msgId) => reactToMessage(msgId, '❤️'), [reactToMessage]);
 
   // ─── NO SESSION ID: Show sidebar only ───
   if (!id) {
@@ -300,7 +495,7 @@ const ChatScreen = () => {
       <div className="flex h-screen bg-[#06070f] text-white">
         <ChatSidebar 
           role={user?.role} userId={user?.id} sessions={sessions} activeId={null}
-          onSelect={(sessId) => navigate(user?.role === 'ADMIN' ? `/admin/messages/${sessId}` : `/chat/${sessId}`)}
+          onSelect={(sessId) => navigate(user?.role === 'ADMIN' ? `/admin/messages/${sessId}` : (user?.role === 'EXPERT' ? `/expert-panel/chat/${sessId}` : `/chat/${sessId}`))}
         />
         <div className="flex-1 flex flex-col items-center justify-center opacity-20 italic">
           <div className="w-24 h-24 bg-purple-600/5 rounded-full flex items-center justify-center mb-8 border border-purple-500/5">
@@ -319,7 +514,7 @@ const ChatScreen = () => {
       <div className={`fixed inset-y-0 left-0 z-50 transform md:relative md:translate-x-0 transition-transform duration-500 ease-in-out ${isSidebarOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0"}`}>
         <ChatSidebar 
           activeId={resolvedId} sessions={sessions} role={user?.role} userId={user?.id}
-          onSelect={(newId) => { navigate(`/chat/${newId}`); setIsSidebarOpen(false); }} 
+          onSelect={(newId) => { navigate(user?.role === 'ADMIN' ? `/admin/messages/${newId}` : (user?.role === 'EXPERT' ? `/expert-panel/chat/${newId}` : `/chat/${newId}`)); setIsSidebarOpen(false); }} 
         />
       </div>
 
@@ -429,82 +624,7 @@ const ChatScreen = () => {
         </header>
 
         {/* Intake Data Overlay */}
-        <AnimatePresence>
-          {showIntake && currentSession?.intakeData && (
-            <motion.div 
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: 'auto', opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              className="bg-[#0c0d1b]/95 border-b border-white/5 overflow-hidden backdrop-blur-xl shadow-2xl relative z-20"
-            >
-              <div className="max-w-6xl mx-auto p-6">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                  {/* Seeker Info */}
-                  <div className="space-y-4">
-                    <div className="flex items-center gap-2 mb-2">
-                        <div className="w-1.5 h-4 bg-emerald-500 rounded-full" />
-                        <h3 className="text-[12px] font-bold text-white uppercase tracking-widest">Seeker Profile</h3>
-                    </div>
-                    <div className="grid grid-cols-2 gap-4">
-                        <div className="bg-white/5 p-3 rounded-xl border border-white/5">
-                            <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-1">Name</p>
-                            <p className="text-sm font-medium text-emerald-400">{currentSession.intakeData.name}</p>
-                        </div>
-                        <div className="bg-white/5 p-3 rounded-xl border border-white/5">
-                            <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-1">Birth Details</p>
-                            <p className="text-sm font-medium text-white">
-                                {currentSession.intakeData.dob} {currentSession.intakeData.tob && `@ ${currentSession.intakeData.tob}`}
-                            </p>
-                        </div>
-                        <div className="bg-white/5 p-3 rounded-xl border border-white/5">
-                            <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-1">Gender</p>
-                            <p className="text-sm font-medium text-white">{currentSession.intakeData.gender}</p>
-                        </div>
-                        <div className="bg-white/5 p-3 rounded-xl border border-white/5">
-                            <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-1">Place</p>
-                            <p className="text-sm font-medium text-white">{currentSession.intakeData.city}</p>
-                        </div>
-                        <div className="bg-white/5 p-3 rounded-xl border border-white/5 col-span-2">
-                            <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-1">Primary Concern</p>
-                            <p className="text-sm font-medium text-indigo-300 italic">"{currentSession.intakeData.concern}"</p>
-                        </div>
-                    </div>
-                  </div>
-
-                  {/* Partner Info (If exists) */}
-                  {currentSession.intakeData.partnerName && (
-                    <div className="space-y-4">
-                        <div className="flex items-center gap-2 mb-2">
-                            <div className="w-1.5 h-4 bg-purple-500 rounded-full" />
-                            <h3 className="text-[12px] font-bold text-white uppercase tracking-widest">Partner Profile</h3>
-                        </div>
-                        <div className="grid grid-cols-2 gap-4">
-                            <div className="bg-white/5 p-3 rounded-xl border border-white/5">
-                                <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-1">Partner Name</p>
-                                <p className="text-sm font-medium text-purple-400">{currentSession.intakeData.partnerName}</p>
-                            </div>
-                            <div className="bg-white/5 p-3 rounded-xl border border-white/5">
-                                <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-1">Birth Details</p>
-                                <p className="text-sm font-medium text-white">
-                                    {currentSession.intakeData.partnerDob} {currentSession.intakeData.partnerTob && `@ ${currentSession.intakeData.partnerTob}`}
-                                </p>
-                            </div>
-                            <div className="bg-white/5 p-3 rounded-xl border border-white/5">
-                                <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-1">Gender</p>
-                                <p className="text-sm font-medium text-white">{currentSession.intakeData.partnerGender}</p>
-                            </div>
-                            <div className="bg-white/5 p-3 rounded-xl border border-white/5">
-                                <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-1">Place</p>
-                                <p className="text-sm font-medium text-white">{currentSession.intakeData.partnerCity || 'Not specified'}</p>
-                            </div>
-                        </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+        <IntakeOverlay show={showIntake} data={currentSession?.intakeData} />
 
         {/* Messages Area */}
         <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 custom-scrollbar bg-gradient-to-b from-[#06070f] via-[#0a0c1a] to-[#06070f]">
@@ -522,75 +642,13 @@ const ChatScreen = () => {
           ) : (
             <>
               {messages.map((msg) => (
-                <motion.div 
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
+                <ChatMessage 
                   key={msg.id} 
-                  className={`flex ${msg.senderId === user?.id ? 'justify-end' : 'justify-start'} group mb-4`}
-                  onDoubleClick={() => handleHeart(msg.id)}
-                >
-                  <div className="relative max-w-[85%] md:max-w-[70%]">
-                    <div className={`rounded-2xl px-5 py-3.5 transition-all duration-300 shadow-xl ${
-                      msg.senderId === user?.id 
-                        ? 'bg-gradient-to-br from-purple-600 to-indigo-700 text-white rounded-br-none shadow-purple-900/10' 
-                        : 'bg-[#1a1c2e] border border-white/10 text-gray-200 rounded-bl-none shadow-black/20'
-                    } ${msg.reaction ? 'ring-2 ring-pink-500/30 mb-2' : ''}`}>
-                      {msg.isFiltered ? (
-                        <div className="flex items-center gap-2 py-1 italic opacity-50">
-                          <EyeOff size={14} />
-                          <span className="text-xs">Message hidden for security</span>
-                        </div>
-                      ) : (currentSession?.isUnlocked || user?.role === 'EXPERT' || user?.role === 'ADMIN' || currentSession?.status === 'ACTIVE' || currentSession?.status === 'WAITING') ? (
-                        <p className="text-[15px] leading-relaxed break-words whitespace-pre-wrap font-medium">{msg.content}</p>
-                      ) : (
-                        <div className="flex flex-col items-center gap-4 py-6 px-4 bg-black/20 rounded-xl">
-                           <div className="w-10 h-10 rounded-full bg-amber-500/10 flex items-center justify-center">
-                                <Lock size={20} className="text-amber-500" />
-                           </div>
-                           <div className="text-center space-y-1">
-                               <p className="text-[10px] font-bold tracking-widest uppercase text-amber-500">Transcript Locked</p>
-                               <p className="text-[9px] text-gray-500">Recharge to view spiritual insights</p>
-                           </div>
-                           <button 
-                             onClick={() => navigate('/wallet')}
-                             className="w-full py-2 bg-amber-500/20 border border-amber-500/30 text-amber-500 text-[10px] font-bold rounded-xl hover:bg-amber-500/30 transition-all"
-                           >
-                             RECHARGE NOW
-                           </button>
-                        </div>
-                      )}
-                      
-                      <div className="flex items-center justify-between mt-2 pt-1 border-t border-white/5">
-                        <p className={`text-[10px] font-bold uppercase tracking-wider opacity-40`}>
-                           {new Date(msg.createdAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true })}
-                        </p>
-                        {msg.senderId === user?.id && (
-                          <div className="flex items-center gap-1">
-                            {msg.isOptimistic ? (
-                              <Clock size={10} className="text-white/40 animate-pulse" />
-                            ) : msg.isRead ? (
-                              <CheckCheck size={14} className="text-sky-300" />
-                            ) : (
-                              <Check size={14} className="opacity-30" />
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                    
-                    {msg.reaction && (
-                      <motion.div 
-                        initial={{ scale: 0, opacity: 0 }}
-                        animate={{ scale: 1, opacity: 1 }}
-                        className={`absolute -bottom-3 ${msg.senderId === user?.id ? 'right-2' : 'left-2'}`}
-                      >
-                        <div className="bg-pink-600 rounded-full py-1 px-2 border-2 border-[#1a1c2e] shadow-xl text-[12px] flex items-center justify-center">
-                          {msg.reaction}
-                        </div>
-                      </motion.div>
-                    )}
-                  </div>
-                </motion.div>
+                  msg={msg} 
+                  isOwn={msg.senderId === user?.id} 
+                  onHeart={handleHeart}
+                  formatTime={formatTime}
+                />
               ))}
               <div ref={messagesEndRef} />
             </>

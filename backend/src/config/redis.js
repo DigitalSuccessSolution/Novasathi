@@ -25,7 +25,19 @@ try {
   const store = new Map();
   redis = {
     get: async (key) => store.get(key) || null,
-    set: async (key, value, ...args) => { store.set(key, value); return 'OK'; },
+    set: async (key, value, ...args) => { 
+      const isNX = args.includes('NX');
+      if (isNX && store.has(key)) return null;
+      
+      store.set(key, value);
+      
+      const exIndex = args.indexOf('EX');
+      if (exIndex !== -1 && args[exIndex + 1]) {
+        const ttl = parseInt(args[exIndex + 1]);
+        setTimeout(() => store.delete(key), ttl * 1000);
+      }
+      return 'OK'; 
+    },
     del: async (key) => { store.delete(key); return 1; },
     keys: async (pattern) => [...store.keys()].filter(k => k.includes(pattern.replace('*', ''))),
     setex: async (key, ttl, value) => { store.set(key, value); setTimeout(() => store.delete(key), ttl * 1000); return 'OK'; },

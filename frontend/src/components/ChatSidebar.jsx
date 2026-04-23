@@ -23,7 +23,7 @@ const ChatSidebar = ({ activeId, onSelect, sessions = [], userId, role }) => {
         if (onSelect) {
             onSelect(id);
         } else {
-            const prefix = role === 'ADMIN' ? '/admin/messages' : (role === 'EXPERT' ? '/expert/chat' : '/chat');
+            const prefix = role === 'ADMIN' ? '/admin/messages' : (role === 'EXPERT' ? '/expert-panel/chat' : '/chat');
             navigate(`${prefix}/${id}`);
         }
     };
@@ -32,7 +32,18 @@ const ChatSidebar = ({ activeId, onSelect, sessions = [], userId, role }) => {
     const getAvatar = (sess) => {
         const isSelfSeeker = userId === sess.userId;
         const otherParty = isSelfSeeker ? sess.expert?.user : sess.user;
-        return otherParty?.avatar || sess.expert?.profileImage || `https://ui-avatars.com/api/?name=${otherParty?.name || 'Soul'}&background=6D28D9&color=FFFFFF`;
+        let avatarUrl = otherParty?.avatar;
+        if (isSelfSeeker && !avatarUrl) {
+            avatarUrl = sess.expert?.profileImage;
+        }
+
+        if (avatarUrl && !avatarUrl.startsWith('http')) {
+            const baseUrl = (import.meta.env.VITE_API_BASE_URL || '').split('/api')[0];
+            avatarUrl = `${baseUrl}/${avatarUrl}`;
+        }
+
+        const displayName = (sess.isAnonymous && !isSelfSeeker) ? "Anonymous Soul" : (otherParty?.name || sess.expert?.displayName || "Unknown");
+        return avatarUrl || `https://ui-avatars.com/api/?name=${displayName}&background=6D28D9&color=FFFFFF`;
     };
 
     const getName = (sess) => {
@@ -44,14 +55,15 @@ const ChatSidebar = ({ activeId, onSelect, sessions = [], userId, role }) => {
 
     const getLastMsg = (sess) => {
         if (sess.messages && sess.messages.length > 0) {
-            return sess.messages[sess.messages.length - 1].content;
+            const last = sess.messages[sess.messages.length - 1];
+            return last.messageType === 'IMAGE' ? "📷 Photo" : last.content;
         }
         return "New Ritual Request ✨";
     };
 
     const getTime = (sess) => {
         const date = sess.updatedAt ? new Date(sess.updatedAt) : new Date(sess.createdAt);
-        return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
     };
 
     return (
@@ -66,7 +78,7 @@ const ChatSidebar = ({ activeId, onSelect, sessions = [], userId, role }) => {
                         >
                             <ArrowLeft size={16} className="group-hover:-translate-x-0.5 transition-transform" />
                         </button>
-                        <h2 className="text-[10px] font-sans font-semibold  tracking-[0.4em] text-white/85">Active Resonance</h2>
+                        <h2 className="text-[10px] font-sans font-semibold  tracking-[0.4em] text-white/85 uppercase">Conversations</h2>
                     </div>
                     <Sparkles size={14} className="text-purple-400 animate-pulse" />
                 </div>
@@ -75,7 +87,7 @@ const ChatSidebar = ({ activeId, onSelect, sessions = [], userId, role }) => {
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-white/85 group-hover:text-purple-400 transition-colors" size={14} />
                     <input 
                         type="text" 
-                        placeholder="Search Seekers..." 
+                        placeholder="Search chats..." 
                         className="w-full bg-white/5 border border-white/10 rounded-xl py-2.5 pl-10 pr-4 text-[10px]  tracking-widest text-white outline-hidden focus:border-purple-500/50 focus:bg-white/10 transition-all font-sans font-semibold placeholder:text-white/40"
                     />
                 </div>
@@ -88,10 +100,10 @@ const ChatSidebar = ({ activeId, onSelect, sessions = [], userId, role }) => {
                         key={session.id}
                         initial={{ opacity: 0, x: -10 }}
                         animate={{ opacity: 1, x: 0 }}
-                        onClick={() => onSelect && onSelect(session.id)}
+                        onClick={() => handleSelect(session.id)}
                         className={`w-full p-3 rounded-2xl flex items-center gap-3 transition-all duration-500 group relative overflow-hidden ${
                             activeId === session.id 
-                            ? 'bg-purple-600/20 border border-purple-500/30' 
+                            ? 'bg-purple-600/20 border border-purple-500/30 shadow-[0_0_20px_rgba(168,85,247,0.1)]' 
                             : 'hover:bg-white/5 border border-transparent'
                         }`}
                     >
@@ -104,29 +116,35 @@ const ChatSidebar = ({ activeId, onSelect, sessions = [], userId, role }) => {
                         )}
 
                         <div className="relative shrink-0">
-                            <div className="w-11 h-11 rounded-xl bg-white/5 border border-white/10 p-0.5 overflow-hidden shadow-2xl">
+                            <div className="w-11 h-11 rounded-xl bg-white/5 border border-white/10 p-0.5 overflow-hidden shadow-2xl relative">
                                 <img 
                                     src={getAvatar(session)} 
-                                    className={`w-full h-full rounded-xl transition-all duration-700 ${session.status === 'ACTIVE' ? 'grayscale-0' : 'grayscale'}`} 
+                                    className={`w-full h-full rounded-xl object-cover transition-all duration-700 ${session.status === 'ACTIVE' ? 'grayscale-0' : 'grayscale-50 opacity-60'}`} 
                                     alt={getName(session)}
+                                    onError={(e) => { e.target.src = `https://ui-avatars.com/api/?name=${getName(session)}&background=6D28D9&color=FFFFFF`; }}
                                 />
                             </div>
                             {session.status === 'ACTIVE' && (
-                                <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-emerald-500 border-2 border-black rounded-full shadow-[0_0_10px_rgba(16,185,129,0.5)]"></div>
+                                <div className="absolute -top-1 -right-1 w-3 h-3 bg-emerald-500 border-2 border-[#0a0b14] rounded-full shadow-[0_0_10px_rgba(16,185,129,0.5)] animate-pulse"></div>
                             )}
                         </div>
 
                         <div className="flex-1 text-left min-w-0 space-y-0.5">
                             <div className="flex items-center justify-between">
-                                <h3 className={`text-xs font-semibold truncate  tracking-tight transition-colors ${activeId === session.id ? 'text-white' : 'text-white/85 group-hover:text-white'}`}>
+                                <h3 className={`text-xs font-semibold truncate tracking-tight transition-colors ${activeId === session.id ? 'text-white' : 'text-white/85 group-hover:text-white'}`}>
                                     {getName(session)}
                                 </h3>
-                                <span className="text-[8px] font-sans font-semibold text-white/85  tracking-widest">{getTime(session)}</span>
+                                <span className="text-[8px] font-sans font-semibold text-white/40 tracking-widest">{getTime(session)}</span>
                             </div>
-                            <div className="flex items-center gap-2">
-                                <p className="text-[10px] text-white/60 truncate flex-1 font-light italic">
+                            <div className="flex items-center justify-between gap-2">
+                                <p className={`text-[10px] truncate flex-1 font-light ${session._unreadCount > 0 ? 'text-white font-medium' : 'text-white/50 italic'}`}>
                                     {getLastMsg(session)}
                                 </p>
+                                {session._unreadCount > 0 && activeId !== session.id && (
+                                    <span className="shrink-0 min-w-[18px] h-[18px] flex items-center justify-center bg-purple-600 text-white text-[9px] font-bold rounded-full px-1 shadow-lg shadow-purple-900/40">
+                                        {session._unreadCount}
+                                    </span>
+                                )}
                             </div>
                         </div>
                     </motion.button>

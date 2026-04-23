@@ -75,7 +75,7 @@ const ExpertEarnings = () => {
         } finally {
             setLoading(false);
         }
-    }, [api, token]);
+    }, [api]);
 
     useEffect(() => {
         fetchEarnings();

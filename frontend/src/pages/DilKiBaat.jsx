@@ -18,6 +18,8 @@ import { useNavigate } from "react-router-dom";
 import { motion as m, AnimatePresence } from "framer-motion";
 import { useCall } from "../context/CallContext";
 import IntakeForm from "../components/IntakeForm";
+import StatusPopup from "../components/StatusPopup";
+import socket from "../lib/socket";
 
 const DilKiBaat = () => {
     const navigate = useNavigate();
@@ -34,6 +36,7 @@ const DilKiBaat = () => {
     const [isIntakeOpen, setIsIntakeOpen] = useState(false);
     const [intakeExpert, setIntakeExpert] = useState(null);
     const [intakeType, setIntakeType] = useState('CHAT');
+    const [statusModal, setStatusModal] = useState({ open: false, expert: null, type: 'busy' });
 
     const [filters, setFilters] = useState([
         { id: "all", label: "all experts" },
@@ -75,11 +78,36 @@ const DilKiBaat = () => {
     useEffect(() => {
         fetchListeners();
         fetchMetadata();
+
+        // Listen for real-time status updates
+        const handleStatusUpdate = ({ expertId, status }) => {
+            setListeners(prev => prev.map(expert => 
+                expert.id === expertId ? { 
+                    ...expert, 
+                    onlineStatus: status,
+                    isOnline: status !== 'offline'
+                } : expert
+            ));
+        };
+
+        socket.on('expert_status_update', handleStatusUpdate);
+
+        return () => {
+            socket.off('expert_status_update', handleStatusUpdate);
+        };
     }, []);
 
     const openIntake = (expert, type) => {
         if (!token) {
             setIsLoginModalOpen(true);
+            return;
+        }
+        if (expert.onlineStatus === 'busy') {
+            setStatusModal({ open: true, expert, type: 'busy' });
+            return;
+        }
+        if (!expert.isOnline) {
+            setStatusModal({ open: true, expert, type: 'offline' });
             return;
         }
         setIntakeExpert(expert);
@@ -207,8 +235,8 @@ const DilKiBaat = () => {
                           className="w-full h-full object-cover grayscale-[0.3] group-hover:grayscale-0 transition-all duration-700 group-hover:scale-105"
                         />
                       </div>
-                      <div className={`absolute bottom-1 right-1 w-5 h-5 rounded-full border-2 border-[#161922] shadow-2xl ${listener.isOnline ? 'bg-emerald-500' : 'bg-slate-700'}`}>
-                        {listener.isOnline && <div className="w-full h-full rounded-full bg-white animate-pulse opacity-40" />}
+                      <div className={`absolute bottom-1 right-1 w-5 h-5 rounded-full border-2 border-[#161922] shadow-2xl ${listener.onlineStatus === 'busy' ? 'bg-amber-500' : listener.isOnline ? 'bg-emerald-500' : 'bg-slate-700'}`}>
+                        {(listener.onlineStatus === 'busy' || listener.isOnline) && <div className={`w-full h-full rounded-full bg-white ${listener.onlineStatus === 'busy' ? '' : 'animate-pulse'} opacity-40`} />}
                       </div>
                     </div>
 
@@ -258,26 +286,30 @@ const DilKiBaat = () => {
                         
                         <div className="flex gap-2">
                           <button
-                            onClick={(e) => { e.stopPropagation(); openIntake(listener, 'CHAT'); }}
+                            onClick={(e) => { e.stopPropagation(); if(listener.onlineStatus !== 'busy') openIntake(listener, 'CHAT'); }}
                             className={`flex items-center gap-2 px-4 py-2 rounded-lg text-[11px] font-bold transition-all  ${
-                              listener.isOnline 
+                              listener.onlineStatus === 'busy' 
+                              ? "bg-amber-500/10 text-amber-500 border border-amber-500/20 cursor-wait"
+                              : listener.isOnline 
                               ? "bg-white text-black hover:bg-slate-200 shadow-lg" 
                               : "bg-white/5 text-slate-600 cursor-not-allowed border border-white/5"
                             }`}
                           >
                             <MessageSquare size={14} />
-                            <span>chat</span>
+                            <span>{listener.onlineStatus === 'busy' ? 'busy' : 'chat'}</span>
                           </button>
                           <button
-                            onClick={(e) => { e.stopPropagation(); openIntake(listener, 'CALL'); }}
+                            onClick={(e) => { e.stopPropagation(); if(listener.onlineStatus !== 'busy') openIntake(listener, 'CALL'); }}
                             className={`flex items-center gap-2 px-4 py-2 rounded-lg text-[11px] font-bold transition-all  ${
-                              listener.isOnline 
+                              listener.onlineStatus === 'busy' 
+                              ? "bg-amber-500/10 text-amber-500 border border-amber-500/20 cursor-wait"
+                              : listener.isOnline 
                               ? "bg-white/5 text-white border border-white/10 hover:bg-white/10" 
                               : "bg-white/5 text-slate-600 cursor-not-allowed border border-white/5"
                             }`}
                           >
                             <Phone size={14} />
-                            <span>call</span>
+                            <span>{listener.onlineStatus === 'busy' ? 'busy' : 'call'}</span>
                           </button>
                         </div>
                       </div>
@@ -288,6 +320,13 @@ const DilKiBaat = () => {
             </div>
           )}
         </div>
+
+        <StatusPopup 
+            isOpen={statusModal.open}
+            onClose={() => setStatusModal({ ...statusModal, open: false })}
+            expert={statusModal.expert}
+            type={statusModal.type}
+        />
       </div>
     );
 };
