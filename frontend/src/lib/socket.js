@@ -6,14 +6,23 @@ const getSocketUrl = () => {
         return import.meta.env.VITE_SOCKET_URL;
     }
 
-    // 2. Production fallback: If we are on a non-localhost domain, 
-    // assume backend is at the same domain/origin or a specific API subdomain
+    // 2. Derive from API URL if available (Production standard)
+    if (import.meta.env.VITE_API_BASE_URL) {
+        try {
+            const apiUrl = new URL(import.meta.env.VITE_API_BASE_URL);
+            return `${apiUrl.protocol}//${apiUrl.host}`;
+        } catch (e) {
+            // Fallback to origin if URL is relative or invalid
+        }
+    }
+
+    // 3. Production fallback: If we are on a non-localhost domain, 
+    // assume backend is at the same domain/origin
     if (window.location.hostname !== 'localhost') {
-        // If your backend is proxied through the same domain (common in prod)
         return window.location.origin; 
     }
 
-    // 3. Local Development fallback
+    // 4. Local Development fallback
     return `http://localhost:5001`;
 };
 
@@ -26,10 +35,15 @@ const SOCKET_URL = getSocketUrl();
 export const socket = io(SOCKET_URL, {
     autoConnect: false,
     reconnection: true,
-    reconnectionAttempts: 10, // Increased for stability
-    reconnectionDelay: 2000,
-    transports: ["websocket", "polling"], // Allow polling fallback for restrictive proxies
-    withCredentials: true
+    reconnectionAttempts: 20, // Increased for stability
+    reconnectionDelay: 1000,
+    reconnectionDelayMax: 5000,
+    randomizationFactor: 0.5,
+    // Production Note: We start with "polling" then upgrade to "websocket".
+    // This is much more reliable through Nginx/Cloudflare/Firewalls.
+    transports: ["polling", "websocket"], 
+    withCredentials: true,
+    path: "/socket.io/" // Explicitly define path
 });
 
 // Guardian events
@@ -39,11 +53,19 @@ socket.on("connect", () => {
 
 socket.on("disconnect", (reason) => {
     console.log("🌑 [SOCKET] Disconnected:", reason);
+    if (reason === "io server disconnect") {
+        // the disconnection was initiated by the server, you need to reconnect manually
+        socket.connect();
+    }
 });
 
 socket.on("connect_error", (err) => {
     console.error("⚠️ [SOCKET] Cosmic Alignment Error:", err.message);
-    console.debug("Context:", { url: SOCKET_URL, auth: socket.auth });
+    console.debug("Context:", { 
+        url: SOCKET_URL, 
+        transport: socket.io?.engine?.transport?.name,
+        auth: socket.auth 
+    });
 });
 
 export default socket;

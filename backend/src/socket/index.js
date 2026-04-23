@@ -22,13 +22,21 @@ function initializeSocket(server) {
       origin: (origin, callback) => {
         const allowedOrigins = [
           process.env.CLIENT_URL,
+          "https://novasathi.com",
+          "https://www.novasathi.com",
           "http://localhost:5173",
           "http://localhost:3000"
         ].filter(Boolean);
         
+        // Log connection attempt origins for production debugging
+        if (process.env.NODE_ENV === 'production') {
+          console.log(`🔌 [SOCKET_CORS] Attempt from: ${origin}`);
+        }
+
         if (!origin || allowedOrigins.includes(origin) || process.env.NODE_ENV !== 'production') {
           callback(null, true);
         } else {
+          console.warn(`🚫 [CORS_REJECTED] Origin: ${origin} not in ${allowedOrigins.join(', ')}`);
           callback(new Error("Not allowed by CORS"));
         }
       },
